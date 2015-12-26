@@ -57,8 +57,11 @@
 GenericFileStoreBackend::GenericFileStoreBackend(FileStore *fs):
   FileStoreBackend(fs),
   ioctl_fiemap(false),
+  seek_data_hole(false),
   m_filestore_fiemap(g_conf->filestore_fiemap),
-  m_filestore_fsync_flushes_journal_data(g_conf->filestore_fsync_flushes_journal_data) {}
+  m_filestore_seek_data_hole(g_conf->filestore_seek_data_hole),
+  m_filestore_fsync_flushes_journal_data(g_conf->filestore_fsync_flushes_journal_data),
+  m_filestore_splice(false) {}
 
 int GenericFileStoreBackend::detect_features()
 {
@@ -108,29 +111,78 @@ int GenericFileStoreBackend::detect_features()
       return r;
     }
   }
-  ::fsync(fd);
 
   // fiemap an extent inside that
-  struct fiemap *fiemap;
-  int r = do_fiemap(fd, 2430421, 59284, &fiemap);
-  if (r < 0) {
-    dout(0) << "detect_features: FIEMAP ioctl is NOT supported" << dendl;
-    ioctl_fiemap = false;
-  } else {
-    if (fiemap->fm_mapped_extents == 0) {
-      dout(0) << "detect_features: FIEMAP ioctl is supported, but buggy -- upgrade your kernel" << dendl;
-      ioctl_fiemap = false;
-    } else {
-      dout(0) << "detect_features: FIEMAP ioctl is supported and appears to work" << dendl;
-      ioctl_fiemap = true;
-    }
-    free(fiemap);
-  }
   if (!m_filestore_fiemap) {
     dout(0) << "detect_features: FIEMAP ioctl is disabled via 'filestore fiemap' config option" << dendl;
     ioctl_fiemap = false;
+  } else {
+    struct fiemap *fiemap;
+    int r = do_fiemap(fd, 2430421, 59284, &fiemap);
+    if (r < 0) {
+      dout(0) << "detect_features: FIEMAP ioctl is NOT supported" << dendl;
+      ioctl_fiemap = false;
+    } else {
+      if (fiemap->fm_mapped_extents == 0) {
+        dout(0) << "detect_features: FIEMAP ioctl is supported, but buggy -- upgrade your kernel" << dendl;
+        ioctl_fiemap = false;
+      } else {
+        dout(0) << "detect_features: FIEMAP ioctl is supported and appears to work" << dendl;
+        ioctl_fiemap = true;
+      }
+      free(fiemap);
+    }
   }
 
+  // SEEK_DATA/SEEK_HOLE detection
+  if (!m_filestore_seek_data_hole) {
+    dout(0) << "detect_features: SEEK_DATA/SEEK_HOLE is disabled via 'filestore seek data hole' config option" << dendl;
+    seek_data_hole = false;
+  } else {
+#if defined(__linux__) && defined(SEEK_HOLE) && defined(SEEK_DATA)
+    // If compiled on an OS with SEEK_HOLE/SEEK_DATA support, but running
+    // on an OS that doesn't support SEEK_HOLE/SEEK_DATA, EINVAL is returned.
+    // Fall back to use fiemap.
+    off_t hole_pos;
+
+    hole_pos = lseek(fd, 0, SEEK_HOLE);
+    if (hole_pos < 0) {
+      if (errno == EINVAL) {
+        dout(0) << "detect_features: lseek SEEK_DATA/SEEK_HOLE is NOT supported" << dendl;
+        seek_data_hole = false;
+      } else {
+        derr << "detect_features: failed to lseek " << fn << ": " << cpp_strerror(-errno) << dendl;
+        VOID_TEMP_FAILURE_RETRY(::close(fd));
+        return -errno;
+      }
+    } else {
+      dout(0) << "detect_features: lseek SEEK_DATA/SEEK_HOLE is supported" << dendl;
+      seek_data_hole = true;
+    }
+#endif
+  }
+
+  //splice detection
+#ifdef CEPH_HAVE_SPLICE
+  if (!m_filestore_splice) {
+    int pipefd[2];
+    loff_t off_in = 0;
+    int r;
+    if ((r = pipe(pipefd)) < 0)
+      dout(0) << "detect_features: splice  pipe met error " << cpp_strerror(errno) << dendl;
+    else {
+      lseek(fd, 0, SEEK_SET);
+      r = splice(fd, &off_in, pipefd[1], NULL, 10, 0);
+      if (!(r < 0 && errno == EINVAL)) {
+	m_filestore_splice = true;
+	dout(0) << "detect_features: splice is supported" << dendl;
+      } else
+	dout(0) << "detect_features: splice is NOT supported" << dendl;
+      close(pipefd[0]);
+      close(pipefd[1]);
+    }
+  }
+#endif
   ::unlink(fn);
   VOID_TEMP_FAILURE_RETRY(::close(fd));
 
@@ -218,17 +270,26 @@ int GenericFileStoreBackend::do_fiemap(int fd, off_t start, size_t len, struct f
   fiemap = (struct fiemap*)calloc(sizeof(struct fiemap), 1);
   if (!fiemap)
     return -ENOMEM;
+  /*
+   * There is a bug on xfs about fiemap. Suppose(offset=3990, len=4096),
+   * the result is (logical=4096, len=4096). It leak the [3990, 4096).
+   * Commit:"xfs: fix rounding error of fiemap length parameter
+   * (eedf32bfcace7d8e20cc66757d74fc68f3439ff7)" fix this bug.
+   * Here, we make offset aligned with CEPH_PAGE_SIZE to avoid this bug.
+   */
+  fiemap->fm_start = start - start % CEPH_PAGE_SIZE;
+  fiemap->fm_length = len + start % CEPH_PAGE_SIZE;
+  fiemap->fm_flags = FIEMAP_FLAG_SYNC; /* flush extents to disk if needed */
 
-  fiemap->fm_start = start;
-  fiemap->fm_length = len;
-
-  fsync(fd); /* flush extents to disk if needed */
-
+#if defined(DARWIN) || defined(__FreeBSD__)
+  ret = -ENOTSUP;
+  goto done_err;
+#else
   if (ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0) {
     ret = -errno;
     goto done_err;
   }
-
+#endif
   size = sizeof(struct fiemap_extent) * (fiemap->fm_mapped_extents);
 
   _realloc_fiemap = (struct fiemap *)realloc(fiemap, sizeof(struct fiemap) + size);
@@ -244,12 +305,16 @@ int GenericFileStoreBackend::do_fiemap(int fd, off_t start, size_t len, struct f
   fiemap->fm_extent_count = fiemap->fm_mapped_extents;
   fiemap->fm_mapped_extents = 0;
 
+#if defined(DARWIN) || defined(__FreeBSD__)
+  ret = -ENOTSUP;
+  goto done_err;
+#else
   if (ioctl(fd, FS_IOC_FIEMAP, fiemap) < 0) {
     ret = -errno;
     goto done_err;
   }
   *pfiemap = fiemap;
-
+#endif
   return 0;
 
 done_err:

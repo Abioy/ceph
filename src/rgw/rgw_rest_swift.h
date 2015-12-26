@@ -13,7 +13,10 @@ public:
   RGWGetObj_ObjStore_SWIFT() {}
   ~RGWGetObj_ObjStore_SWIFT() {}
 
+  int get_params();
+  int send_response_data_error();
   int send_response_data(bufferlist& bl, off_t ofs, off_t len);
+  bool need_object_expiration() { return true; }
 };
 
 class RGWListBuckets_ObjStore_SWIFT : public RGWListBuckets_ObjStore {
@@ -28,6 +31,7 @@ public:
   void send_response_end();
 
   bool should_get_stats() { return need_stats; }
+  bool supports_account_metadata() { return true; }
 };
 
 class RGWListBucket_ObjStore_SWIFT : public RGWListBucket_ObjStore {
@@ -40,14 +44,17 @@ public:
 
   int get_params();
   void send_response();
+  bool need_container_stats() { return true; }
 };
 
 class RGWStatAccount_ObjStore_SWIFT : public RGWStatAccount_ObjStore {
+  map<string, bufferlist> attrs;
 public:
   RGWStatAccount_ObjStore_SWIFT() {
   }
   ~RGWStatAccount_ObjStore_SWIFT() {}
 
+  void execute();
   void send_response();
 };
 
@@ -85,22 +92,32 @@ public:
   void send_response();
 };
 
-class RGWPutMetadata_ObjStore_SWIFT : public RGWPutMetadata_ObjStore {
+class RGWPutMetadataAccount_ObjStore_SWIFT : public RGWPutMetadataAccount_ObjStore {
 public:
-  RGWPutMetadata_ObjStore_SWIFT() {}
-  ~RGWPutMetadata_ObjStore_SWIFT() {}
+  RGWPutMetadataAccount_ObjStore_SWIFT() {}
+  ~RGWPutMetadataAccount_ObjStore_SWIFT() {}
 
   int get_params();
   void send_response();
 };
 
-class RGWSetTempUrl_ObjStore_SWIFT : public RGWSetTempUrl_ObjStore {
+class RGWPutMetadataBucket_ObjStore_SWIFT : public RGWPutMetadataBucket_ObjStore {
 public:
-  RGWSetTempUrl_ObjStore_SWIFT() {}
-  ~RGWSetTempUrl_ObjStore_SWIFT() {}
+  RGWPutMetadataBucket_ObjStore_SWIFT() {}
+  ~RGWPutMetadataBucket_ObjStore_SWIFT() {}
 
   int get_params();
   void send_response();
+};
+
+class RGWPutMetadataObject_ObjStore_SWIFT : public RGWPutMetadataObject_ObjStore {
+public:
+  RGWPutMetadataObject_ObjStore_SWIFT() {}
+  ~RGWPutMetadataObject_ObjStore_SWIFT() {}
+
+  int get_params();
+  void send_response();
+  bool need_object_expiration() { return true; }
 };
 
 class RGWDeleteObj_ObjStore_SWIFT : public RGWDeleteObj_ObjStore {
@@ -108,11 +125,15 @@ public:
   RGWDeleteObj_ObjStore_SWIFT() {}
   ~RGWDeleteObj_ObjStore_SWIFT() {}
 
+  int get_params();
+  bool need_object_expiration() { return true; }
   void send_response();
 };
 
 class RGWCopyObj_ObjStore_SWIFT : public RGWCopyObj_ObjStore {
   bool sent_header;
+protected:
+  void dump_copy_info();
 public:
   RGWCopyObj_ObjStore_SWIFT() : sent_header(false) {}
   ~RGWCopyObj_ObjStore_SWIFT() {}
@@ -147,6 +168,16 @@ public:
   void send_response();
 };
 
+class RGWBulkDelete_ObjStore_SWIFT : public RGWBulkDelete_ObjStore {
+public:
+  RGWBulkDelete_ObjStore_SWIFT() {}
+  ~RGWBulkDelete_ObjStore_SWIFT() {}
+
+  int get_data(std::list<RGWBulkDelete::acct_path_t>& items,
+               bool * is_truncated);
+  void send_response();
+};
+
 class RGWHandler_ObjStore_SWIFT : public RGWHandler_ObjStore {
   friend class RGWRESTMgr_SWIFT;
 protected:
@@ -173,6 +204,7 @@ protected:
   RGWOp *op_get();
   RGWOp *op_head();
   RGWOp *op_post();
+  RGWOp *op_delete();
 public:
   RGWHandler_ObjStore_Service_SWIFT() {}
   virtual ~RGWHandler_ObjStore_Service_SWIFT() {}
@@ -220,9 +252,6 @@ public:
   RGWRESTMgr_SWIFT() {}
   virtual ~RGWRESTMgr_SWIFT() {}
 
-  virtual RGWRESTMgr *get_resource_mgr(struct req_state *s, const string& uri) {
-    return this;
-  }
   virtual RGWHandler *get_handler(struct req_state *s);
 };
 

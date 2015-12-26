@@ -4,6 +4,7 @@
  * Ceph distributed storage system
  *
  * Copyright (C) 2013, 2014 Cloudwatt <libre.licensing@cloudwatt.com>
+ * Copyright (C) 2014 Red Hat <contact@redhat.com>
  *
  * Author: Loic Dachary <loic@dachary.org>
  *
@@ -19,34 +20,37 @@
 
 #include "erasure-code/ErasureCode.h"
 
+#define DEFAULT_RULESET_ROOT "default"
+#define DEFAULT_RULESET_FAILURE_DOMAIN "host"
+
 class ErasureCodeJerasure : public ErasureCode {
 public:
   int k;
-  int DEFAULT_K;
+  std::string DEFAULT_K;
   int m;
-  int DEFAULT_M;
+  std::string DEFAULT_M;
   int w;
-  int DEFAULT_W;
+  std::string DEFAULT_W;
   const char *technique;
   string ruleset_root;
   string ruleset_failure_domain;
   bool per_chunk_alignment;
 
   ErasureCodeJerasure(const char *_technique) :
-    DEFAULT_K(2),
-    DEFAULT_M(1),
-    DEFAULT_W(8),
+    k(0),
+    DEFAULT_K("2"),
+    m(0),
+    DEFAULT_M("1"),
+    w(0),
+    DEFAULT_W("8"),
     technique(_technique),
-    ruleset_root("default"),
-    ruleset_failure_domain("host"),
+    ruleset_root(DEFAULT_RULESET_ROOT),
+    ruleset_failure_domain(DEFAULT_RULESET_FAILURE_DOMAIN),
     per_chunk_alignment(false)
   {}
 
   virtual ~ErasureCodeJerasure() {}
   
-  virtual int parse(const map<std::string,std::string> &parameters,
-		    ostream *ss);
-
   virtual int create_ruleset(const string &name,
 			     CrushWrapper &crush,
 			     ostream *ss) const;
@@ -68,7 +72,8 @@ public:
 			    const map<int, bufferlist> &chunks,
 			    map<int, bufferlist> *decoded);
 
-  void init(const map<std::string,std::string> &parameters);
+  virtual int init(ErasureCodeProfile &profile, ostream *ss);
+
   virtual void jerasure_encode(char **data,
                                char **coding,
                                int blocksize) = 0;
@@ -79,6 +84,8 @@ public:
   virtual unsigned get_alignment() const = 0;
   virtual void prepare() = 0;
   static bool is_prime(int value);
+protected:
+  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
 };
 
 class ErasureCodeJerasureReedSolomonVandermonde : public ErasureCodeJerasure {
@@ -89,9 +96,9 @@ public:
     ErasureCodeJerasure("reed_sol_van"),
     matrix(0)
   {
-    DEFAULT_K = 7;
-    DEFAULT_M = 3;
-    DEFAULT_W = 8;
+    DEFAULT_K = "7";
+    DEFAULT_M = "3";
+    DEFAULT_W = "8";
   }
   virtual ~ErasureCodeJerasureReedSolomonVandermonde() {
     if (matrix)
@@ -106,9 +113,9 @@ public:
                                char **coding,
                                int blocksize);
   virtual unsigned get_alignment() const;
-  virtual int parse(const map<std::string,std::string> &parameters,
-		    ostream *ss);
   virtual void prepare();
+private:
+  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
 };
 
 class ErasureCodeJerasureReedSolomonRAID6 : public ErasureCodeJerasure {
@@ -119,8 +126,8 @@ public:
     ErasureCodeJerasure("reed_sol_r6_op"),
     matrix(0)
   {
-    DEFAULT_K = 7;
-    DEFAULT_W = 8;
+    DEFAULT_K = "7";
+    DEFAULT_W = "8";
   }
   virtual ~ErasureCodeJerasureReedSolomonRAID6() {
     if (matrix)
@@ -135,14 +142,15 @@ public:
                                char **coding,
                                int blocksize);
   virtual unsigned get_alignment() const;
-  virtual int parse(const map<std::string,std::string> &parameters,
-		    ostream *ss);
   virtual void prepare();
+private:
+  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
 };
+
+#define DEFAULT_PACKETSIZE "2048"
 
 class ErasureCodeJerasureCauchy : public ErasureCodeJerasure {
 public:
-  static const int DEFAULT_PACKETSIZE = 2048;
   int *bitmatrix;
   int **schedule;
   int packetsize;
@@ -152,9 +160,9 @@ public:
     bitmatrix(0),
     schedule(0)
   {
-    DEFAULT_K = 7;
-    DEFAULT_M = 3;
-    DEFAULT_W = 8;
+    DEFAULT_K = "7";
+    DEFAULT_M = "3";
+    DEFAULT_W = "8";
   }
   virtual ~ErasureCodeJerasureCauchy() {
     if (bitmatrix)
@@ -171,9 +179,9 @@ public:
                                char **coding,
                                int blocksize);
   virtual unsigned get_alignment() const;
-  virtual int parse(const map<std::string,std::string> &parameters,
-		    ostream *ss);
   void prepare_schedule(int *matrix);
+private:
+  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
 };
 
 class ErasureCodeJerasureCauchyOrig : public ErasureCodeJerasureCauchy {
@@ -196,7 +204,6 @@ public:
 
 class ErasureCodeJerasureLiberation : public ErasureCodeJerasure {
 public:
-  static const int DEFAULT_PACKETSIZE = 2048;
   int *bitmatrix;
   int **schedule;
   int packetsize;
@@ -206,9 +213,9 @@ public:
     bitmatrix(0),
     schedule(0)
   {
-    DEFAULT_K = 2;
-    DEFAULT_M = 2;
-    DEFAULT_W = 7;
+    DEFAULT_K = "2";
+    DEFAULT_M = "2";
+    DEFAULT_W = "7";
   }
   virtual ~ErasureCodeJerasureLiberation();
 
@@ -220,17 +227,25 @@ public:
                                char **coding,
                                int blocksize);
   virtual unsigned get_alignment() const;
-  virtual int parse(const map<std::string,std::string> &parameters,
-		    ostream *ss);
+  virtual bool check_k(ostream *ss) const;
+  virtual bool check_w(ostream *ss) const;
+  virtual bool check_packetsize_set(ostream *ss) const;
+  virtual bool check_packetsize(ostream *ss) const;
+  virtual int revert_to_default(ErasureCodeProfile &profile,
+				ostream *ss);
   virtual void prepare();
+private:
+  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
 };
 
 class ErasureCodeJerasureBlaumRoth : public ErasureCodeJerasureLiberation {
 public:
   ErasureCodeJerasureBlaumRoth() :
     ErasureCodeJerasureLiberation("blaum_roth")
-  {}
+  {
+  }
 
+  virtual bool check_w(ostream *ss) const;
   virtual void prepare();
 };
 
@@ -239,14 +254,14 @@ public:
   ErasureCodeJerasureLiber8tion() :
     ErasureCodeJerasureLiberation("liber8tion")
   {
-    DEFAULT_K = 2;
-    DEFAULT_M = 2;
-    DEFAULT_W = 8;
+    DEFAULT_K = "2";
+    DEFAULT_M = "2";
+    DEFAULT_W = "8";
   }
 
-  virtual int parse(const map<std::string,std::string> &parameters,
-		    ostream *ss);
   virtual void prepare();
+private:
+  virtual int parse(ErasureCodeProfile &profile, ostream *ss);
 };
 
 #endif

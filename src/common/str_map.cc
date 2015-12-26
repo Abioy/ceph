@@ -58,6 +58,20 @@ int get_json_str_map(
   }
   return 0;
 }
+string trim(const string& str) {
+  size_t start = 0;
+  size_t end = str.size() - 1;
+  while (isspace(str[start]) != 0 && start <= end) {
+    ++start;
+  }
+  while (isspace(str[end]) != 0 && start <= end) {
+    --end;
+  }
+  if (start <= end) {
+    return str.substr(start, end - start + 1);
+  }
+  return string();
+}
 
 int get_str_map(
     const string &str,
@@ -71,9 +85,9 @@ int get_str_map(
     if (equal == string::npos)
       (*str_map)[*i] = string();
     else {
-      const string key = i->substr(0, equal);
+      const string key = trim(i->substr(0, equal));
       equal++;
-      const string value = i->substr(equal);
+      const string value = trim(i->substr(equal));
       (*str_map)[key] = value;
     }
   }
@@ -127,4 +141,33 @@ string get_str_map_key(
       return p->second;
   }
   return string();
+}
+
+// This function's only purpose is to check whether a given map has only
+// ONE key with an empty value (which would mean that 'get_str_map()' read
+// a map in the form of 'VALUE', without any KEY/VALUE pairs) and, in such
+// event, to assign said 'VALUE' to a given 'def_key', such that we end up
+// with a map of the form "m = { 'def_key' : 'VALUE' }" instead of the
+// original "m = { 'VALUE' : '' }".
+int get_conf_str_map_helper(
+    const string &str,
+    ostringstream &oss,
+    map<string,string> *m,
+    const string &def_key)
+{
+  int r = get_str_map(str, m);
+
+  if (r < 0) {
+    return r;
+  }
+
+  if (r >= 0 && m->size() == 1) {
+    map<string,string>::iterator p = m->begin();
+    if (p->second.empty()) {
+      string s = p->first;
+      m->erase(s);
+      (*m)[def_key] = s;
+    }
+  }
+  return r;
 }

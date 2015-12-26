@@ -31,6 +31,7 @@
 #include "include/assert.h"
 
 #define dout_subsys ceph_subsys_keyvaluestore
+
 const string GenericObjectMap::GLOBAL_STATE_KEY = "HEADER";
 
 const string GenericObjectMap::USER_PREFIX = "_SEQ_";
@@ -43,6 +44,7 @@ const string GenericObjectMap::PARENT_KEY = "_PARENT_HEADER_";
 // so use "!" to separated
 const string GenericObjectMap::GHOBJECT_KEY_SEP_S = "!";
 const char GenericObjectMap::GHOBJECT_KEY_SEP_C = '!';
+const char GenericObjectMap::GHOBJECT_KEY_ENDING = 0xFF;
 
 // ============== GenericObjectMap Key Function =================
 
@@ -108,21 +110,34 @@ string GenericObjectMap::header_key(const coll_t &cid, const ghobject_t &oid)
   full_name.append(GHOBJECT_KEY_SEP_S);
 
   char buf[PATH_MAX];
-  char *t = buf;
-  char *end = t + sizeof(buf);
+  char *t;
+  char *end;
 
-  // make field ordering match with hobject_t compare operations
-  snprintf(t, end - t, "%.*X", (int)(sizeof(oid.hobj.hash)*2),
-           (uint32_t)oid.get_filestore_key_u32());
+  // make field ordering match with ghobject_t compare operations
+  t = buf;
+  end = t + sizeof(buf);
+  if (oid.shard_id == shard_id_t::NO_SHARD) {
+    // otherwise ff will sort *after* 0, not before.
+    full_name += "--";
+  } else {
+    t += snprintf(t, end - t, "%02x", (int)oid.shard_id);
+    full_name += string(buf);
+  }
+  full_name.append(GHOBJECT_KEY_SEP_S);
+
+  t = buf;
+  t += snprintf(t, end - t, "%016llx",
+		(long long)(oid.hobj.pool + 0x8000000000000000));
+  full_name += string(buf);
+  full_name.append(GHOBJECT_KEY_SEP_S);
+
+  t = buf;
+  snprintf(t, end - t, "%.*X", (int)(sizeof(oid.hobj.get_hash())*2),
+           (uint32_t)oid.hobj.get_bitwise_key_u32());
   full_name += string(buf);
   full_name.append(GHOBJECT_KEY_SEP_S);
 
   append_escaped(oid.hobj.nspace, &full_name);
-  full_name.append(GHOBJECT_KEY_SEP_S);
-
-  t = buf;
-  t += snprintf(t, end - t, "%lld", (long long)oid.hobj.pool);
-  full_name += string(buf);
   full_name.append(GHOBJECT_KEY_SEP_S);
 
   append_escaped(oid.hobj.get_key(), &full_name);
@@ -142,21 +157,15 @@ string GenericObjectMap::header_key(const coll_t &cid, const ghobject_t &oid)
   full_name += string(buf);
 
   if (oid.generation != ghobject_t::NO_GEN) {
-    assert(oid.shard_id != shard_id_t::NO_SHARD);
     full_name.append(GHOBJECT_KEY_SEP_S);
 
     t = buf;
     end = t + sizeof(buf);
-    t += snprintf(t, end - t, "%llx", (long long unsigned)oid.generation);
-    full_name += string(buf);
-
-    full_name.append(GHOBJECT_KEY_SEP_S);
-
-    t = buf;
-    end = t + sizeof(buf);
-    t += snprintf(t, end - t, "%x", (int)oid.shard_id);
+    t += snprintf(t, end - t, "%016llx", (long long unsigned)oid.generation);
     full_name += string(buf);
   }
+
+  full_name.append(1, GHOBJECT_KEY_ENDING);
 
   return full_name;
 }
@@ -170,7 +179,7 @@ bool GenericObjectMap::parse_header_key(const string &long_name,
   string ns;
   uint32_t hash;
   snapid_t snap;
-  uint64_t pool;
+  int64_t pool;
   gen_t generation = ghobject_t::NO_GEN;
   shard_id_t shard_id = shard_id_t::NO_SHARD;
 
@@ -180,6 +189,24 @@ bool GenericObjectMap::parse_header_key(const string &long_name,
   for (end = current; end != long_name.end() && *end != GHOBJECT_KEY_SEP_C; ++end) ;
   if (!append_unescaped(current, end, &coll))
     return false;
+
+  current = ++end;
+  for ( ; end != long_name.end() && *end != GHOBJECT_KEY_SEP_C; ++end) ;
+  if (end == long_name.end())
+    return false;
+  string shardstring = string(current, end);
+  if (shardstring == "--")
+    shard_id = shard_id_t::NO_SHARD;
+  else
+    shard_id = (shard_id_t)strtoul(shardstring.c_str(), NULL, 16);
+
+  current = ++end;
+  for ( ; end != long_name.end() && *end != GHOBJECT_KEY_SEP_C; ++end) ;
+  if (end == long_name.end())
+    return false;
+  string pstring(current, end);
+  pool = strtoull(pstring.c_str(), NULL, 16);
+  pool -= 0x8000000000000000;
 
   current = ++end;
   for ( ; end != long_name.end() && *end != GHOBJECT_KEY_SEP_C; ++end) ;
@@ -199,16 +226,6 @@ bool GenericObjectMap::parse_header_key(const string &long_name,
   for ( ; end != long_name.end() && *end != GHOBJECT_KEY_SEP_C; ++end) ;
   if (end == long_name.end())
     return false;
-  string pstring(current, end);
-  if (pstring == "none")
-    pool = (uint64_t)-1;
-  else
-    pool = strtoull(pstring.c_str(), NULL, 16);
-
-  current = ++end;
-  for ( ; end != long_name.end() && *end != GHOBJECT_KEY_SEP_C; ++end) ;
-  if (end == long_name.end())
-    return false;
   if (!append_unescaped(current, end, &key))
     return false;
 
@@ -220,7 +237,10 @@ bool GenericObjectMap::parse_header_key(const string &long_name,
     return false;
 
   current = ++end;
-  for ( ; end != long_name.end() && *end != GHOBJECT_KEY_SEP_C; ++end) ;
+  for ( ; end != long_name.end() && *end != GHOBJECT_KEY_SEP_C &&
+	  *end != GHOBJECT_KEY_ENDING; ++end) ;
+  if (end == long_name.end())
+    return false;
   string snap_str(current, end);
   if (snap_str == "head")
     snap = CEPH_NOSNAP;
@@ -230,34 +250,27 @@ bool GenericObjectMap::parse_header_key(const string &long_name,
     snap = strtoull(snap_str.c_str(), NULL, 16);
 
   // Optional generation/shard_id
-  string genstring, shardstring;
-  if (end != long_name.end()) {
+  string genstring;
+  if (*end == GHOBJECT_KEY_SEP_C) {
     current = ++end;
-    for ( ; end != long_name.end() && *end != GHOBJECT_KEY_SEP_C; ++end) ;
-    if (end == long_name.end())
-      return false;
-    genstring = string(current, end);
-
-    generation = (gen_t)strtoull(genstring.c_str(), NULL, 16);
-
-    current = ++end;
-    for ( ; end != long_name.end() && *end != GHOBJECT_KEY_SEP_C; ++end) ;
+    for ( ; end != long_name.end() && *end != GHOBJECT_KEY_ENDING; ++end) ;
     if (end != long_name.end())
       return false;
-    shardstring = string(current, end);
-
-    shard_id = (shard_id_t)strtoul(shardstring.c_str(), NULL, 16);
+    genstring = string(current, end);
+    generation = (gen_t)strtoull(genstring.c_str(), NULL, 16);
   }
 
   if (out) {
-    (*out) = ghobject_t(hobject_t(name, key, snap, hash, (int64_t)pool, ns),
+    (*out) = ghobject_t(hobject_t(name, key, snap,
+				  hobject_t::_reverse_bits(hash),
+				  (int64_t)pool, ns),
                         generation, shard_id);
-    // restore reversed hash. see calculate_key
-    out->hobj.hash = out->get_filestore_key();
   }
 
-  if (out_coll)
-    *out_coll = coll_t(coll);
+  if (out_coll) {
+    bool valid = out_coll->parse(coll);
+    assert(valid);
+  }
 
   return true;
 }
@@ -402,7 +415,7 @@ bool GenericObjectMap::GenericObjectMapIteratorImpl::valid_parent()
   return false;
 }
 
-int GenericObjectMap::GenericObjectMapIteratorImpl::next()
+int GenericObjectMap::GenericObjectMapIteratorImpl::next(bool validate)
 {
   assert(cur_iter->valid());
   assert(valid());
@@ -520,6 +533,7 @@ int GenericObjectMap::clear(const Header header,
 
 int GenericObjectMap::rm_keys(const Header header,
                               const string &prefix,
+                              const set<string> &buffered_keys,
                               const set<string> &to_clear,
                               KeyValueDB::Transaction t)
 {
@@ -549,7 +563,7 @@ int GenericObjectMap::rm_keys(const Header header,
         begin = new_complete.rbegin()->first;
       }
       while (iter->valid() && copied < 20) {
-        if (!to_clear.count(iter->key()))
+        if (!to_clear.count(iter->key()) && !buffered_keys.count(iter->key()))
           to_write[iter->key()].append(iter->value());
         if (i != to_clear.end() && *i <= iter->key()) {
           ++i;
@@ -614,7 +628,7 @@ int GenericObjectMap::get_keys(const coll_t &cid, const ghobject_t &oid,
     return -ENOENT;
 
   ObjectMap::ObjectMapIterator iter = _get_iterator(header, prefix);
-  for (; iter->valid(); iter->next()) {
+  for (iter->seek_to_first(); iter->valid(); iter->next()) {
     if (iter->status())
       return iter->status();
     keys->insert(iter->key());
@@ -673,6 +687,14 @@ void GenericObjectMap::clone(const Header parent, const coll_t &cid,
     *old_header = source;
   if (new_header)
     *new_header = destination;
+
+  // Clone will set parent header and rm_keys wll lookup_parent which will try
+  // to find parent header. So it will let lookup_parent fail when "clone" and
+  // "rm_keys" in one transaction. Here have to sync transaction to make
+  // visiable for lookup_parent
+  // FIXME: Clear transaction operations here
+  int r = submit_transaction_sync(t);
+  assert(r == 0);
 }
 
 void GenericObjectMap::rename(const Header old_header, const coll_t &cid,
@@ -717,15 +739,6 @@ int GenericObjectMap::init(bool do_upgrade)
     state.seq = 1;
   }
   dout(20) << "(init)genericobjectmap: seq is " << state.seq << dendl;
-  return 0;
-}
-
-int GenericObjectMap::sync(const Header header, KeyValueDB::Transaction t)
-{
-  write_state(t);
-  if (header) {
-    set_header(header->cid, header->oid, *header, t);
-  }
   return 0;
 }
 
@@ -1025,7 +1038,7 @@ void GenericObjectMap::remove_header(const coll_t &cid,
 }
 
 void GenericObjectMap::set_header(const coll_t &cid, const ghobject_t &oid,
-                                  _Header header, KeyValueDB::Transaction t)
+                                  _Header &header, KeyValueDB::Transaction t)
 {
   dout(20) << __func__ << " setting " << header.seq
            << " cid " << cid << " oid " << oid << " parent seq "
@@ -1035,16 +1048,15 @@ void GenericObjectMap::set_header(const coll_t &cid, const ghobject_t &oid,
   t->set(GHOBJECT_TO_SEQ_PREFIX, to_set);
 }
 
-int GenericObjectMap::list_objects(const coll_t &cid, ghobject_t start, int max,
+int GenericObjectMap::list_objects(const coll_t &cid, ghobject_t start, ghobject_t end, int max,
                                    vector<ghobject_t> *out, ghobject_t *next)
 {
   // FIXME
   Mutex::Locker l(header_lock);
-
   if (start.is_max())
       return 0;
 
-  if (start.hobj.is_min()) {
+  if (start.is_min()) {
     vector<ghobject_t> oids;
 
     KeyValueDB::Iterator iter = db->get_iterator(GHOBJECT_TO_SEQ_PREFIX);
@@ -1088,7 +1100,14 @@ int GenericObjectMap::list_objects(const coll_t &cid, ghobject_t start, int max,
       break;
     }
 
-    assert(start <= header.oid);
+    if (cmp_bitwise(header.oid, end) >= 0) {
+      if (next)
+	*next = ghobject_t::get_max();
+      break;
+    }
+
+    assert(cmp_bitwise(start, header.oid) <= 0);
+    assert(cmp_bitwise(header.oid, end) < 0);
 
 
     size++;

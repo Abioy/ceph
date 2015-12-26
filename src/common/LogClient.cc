@@ -39,6 +39,45 @@
 #include "common/config.h"
 
 #define dout_subsys ceph_subsys_monc
+
+int parse_log_client_options(CephContext *cct,
+			     map<string,string> &log_to_monitors,
+			     map<string,string> &log_to_syslog,
+			     map<string,string> &log_channels,
+			     map<string,string> &log_prios)
+{
+  ostringstream oss;
+
+  int r = get_conf_str_map_helper(cct->_conf->clog_to_monitors, oss,
+                                  &log_to_monitors, CLOG_CONFIG_DEFAULT_KEY);
+  if (r < 0) {
+    lderr(cct) << __func__ << " error parsing 'clog_to_monitors'" << dendl;
+    return r;
+  }
+
+  r = get_conf_str_map_helper(cct->_conf->clog_to_syslog, oss,
+                              &log_to_syslog, CLOG_CONFIG_DEFAULT_KEY);
+  if (r < 0) {
+    lderr(cct) << __func__ << " error parsing 'clog_to_syslog'" << dendl;
+    return r;
+  }
+
+  r = get_conf_str_map_helper(cct->_conf->clog_to_syslog_facility, oss,
+                              &log_channels, CLOG_CONFIG_DEFAULT_KEY);
+  if (r < 0) {
+    lderr(cct) << __func__ << " error parsing 'clog_to_syslog_facility'" << dendl;
+    return r;
+  }
+
+  r = get_conf_str_map_helper(cct->_conf->clog_to_syslog_level, oss,
+                              &log_prios, CLOG_CONFIG_DEFAULT_KEY);
+  if (r < 0) {
+    lderr(cct) << __func__ << " error parsing 'clog_to_syslog_level'" << dendl;
+    return r;
+  }
+  return 0;
+}
+
 #undef dout_prefix
 #define dout_prefix _prefix(_dout, this)
 static ostream& _prefix(std::ostream *_dout, LogClient *logc) {
@@ -86,6 +125,37 @@ LogClientTemp::~LogClientTemp()
 {
   if (ss.peek() != EOF)
     parent.do_log(type, ss);
+}
+
+void LogChannel::update_config(map<string,string> &log_to_monitors,
+			       map<string,string> &log_to_syslog,
+			       map<string,string> &log_channels,
+			       map<string,string> &log_prios)
+{
+  ldout(cct, 20) << __func__ << " log_to_monitors " << log_to_monitors
+		 << " log_to_syslog " << log_to_syslog
+		 << " log_channels " << log_channels
+		 << " log_prios " << log_prios
+		 << dendl;
+  bool to_monitors = (get_str_map_key(log_to_monitors, log_channel,
+                                      &CLOG_CONFIG_DEFAULT_KEY) == "true");
+  bool to_syslog = (get_str_map_key(log_to_syslog, log_channel,
+                                    &CLOG_CONFIG_DEFAULT_KEY) == "true");
+  string syslog_facility = get_str_map_key(log_channels, log_channel,
+					   &CLOG_CONFIG_DEFAULT_KEY);
+  string prio = get_str_map_key(log_prios, log_channel,
+				&CLOG_CONFIG_DEFAULT_KEY);
+
+  set_log_to_monitors(to_monitors);
+  set_log_to_syslog(to_syslog);
+  set_syslog_facility(syslog_facility);
+  set_log_prio(prio);
+
+  ldout(cct, 10) << __func__
+		 << " to_monitors: " << (to_monitors ? "true" : "false")
+		 << " to_syslog: " << (to_syslog ? "true" : "false")
+		 << " syslog_facility: " << syslog_facility
+		 << " prio: " << prio << ")" << dendl;
 }
 
 void LogChannel::do_log(clog_type prio, std::stringstream& ss)

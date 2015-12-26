@@ -369,8 +369,6 @@ if __name__ == '__main__':
     expect('pg/repair?pgid=0.0', 'PUT', 200, '')
     expect('pg/scrub?pgid=0.0', 'PUT', 200, '')
 
-    expect('pg/send_pg_creates', 'PUT', 200, '')
-
     expect('pg/set_full_ratio?ratio=0.90', 'PUT', 200, '')
     r = expect('pg/dump', 'GET', 200, 'json', JSONHDR)
     assert(float(r.myjson['output']['full_ratio']) == 0.90)
@@ -381,9 +379,9 @@ if __name__ == '__main__':
     expect('pg/set_full_ratio?ratio=0.85', 'PUT', 200, '')
 
     r = expect('pg/stat', 'GET', 200, 'json', JSONHDR)
-    assert('pg_stats_sum' in r.myjson['output'])
+    assert('num_pgs' in r.myjson['output'])
     r = expect('pg/stat', 'GET', 200, 'xml', XMLHDR)
-    assert(r.tree.find('output/pg_map/pg_stats_sum') is not None)
+    assert(r.tree.find('output/pg_summary/num_pgs') is not None)
 
     expect('tell/0.0/query', 'GET', 200, 'json', JSONHDR)
     expect('quorum?quorumcmd=enter', 'PUT', 200, 'json', JSONHDR)

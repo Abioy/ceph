@@ -1,7 +1,9 @@
-v0.86
------
+v10.0.0
+======
 
+* The rbd CLI no longer accepts the deprecated '--image-features' option
+  during create, import, and clone operations.  The '--image-feature'
+  option should be used instead.
 
-
-v0.87
------
+* The 'send_pg_creates' and 'map_pg_creates' mon CLI commands are
+  obsolete and no longer supported.

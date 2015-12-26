@@ -19,13 +19,13 @@
 #include "MDSContext.h"
 #include "mds_table_types.h"
 
-class MDS;
+class MDSRank;
 class LogSegment;
 class MMDSTableRequest;
 
 class MDSTableClient {
 protected:
-  MDS *mds;
+  MDSRank *mds;
   int table;
 
   uint64_t last_reqid;
@@ -57,7 +57,7 @@ protected:
   friend class C_LoggedAck;
 
 public:
-  MDSTableClient(MDS *m, int tab) :
+  MDSTableClient(MDSRank *m, int tab) :
     mds(m), table(tab), last_reqid(~0ULL), server_ready(false) {}
   virtual ~MDSTableClient() {}
 
@@ -80,7 +80,7 @@ public:
     ack_waiters[tid].push_back(c);
   }
 
-  void handle_mds_failure(int mds);
+  void handle_mds_failure(mds_rank_t mds);
 
   // child must implement
   virtual void resend_queries() = 0;

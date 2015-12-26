@@ -16,6 +16,7 @@
 #ifndef CEPH_SIMPLELOCK_H
 #define CEPH_SIMPLELOCK_H
 
+#include "mdstypes.h"
 #include "MDSContext.h"
 
 // -- lock types --
@@ -359,29 +360,30 @@ public:
   }
 
   // gather set
-  static set<int> empty_gather_set;
+  static set<int32_t> empty_gather_set;
 
-  const set<int>& get_gather_set() const {
+  // int32_t: <0 is client, >=0 is MDS rank
+  const set<int32_t>& get_gather_set() const {
     return have_more() ? more()->gather_set : empty_gather_set;
   }
 
   void init_gather() {
-    for (map<int,unsigned>::const_iterator p = parent->replicas_begin();
-	 p != parent->replicas_end(); 
+    for (compact_map<mds_rank_t,unsigned>::iterator p = parent->replicas_begin();
+	 p != parent->replicas_end();
 	 ++p)
       more()->gather_set.insert(p->first);
   }
   bool is_gathering() const {
     return have_more() && !more()->gather_set.empty();
   }
-  bool is_gathering(int i) const {
+  bool is_gathering(int32_t i) const {
     return have_more() && more()->gather_set.count(i);
   }
   void clear_gather() {
     if (have_more())
       more()->gather_set.clear();
   }
-  void remove_gather(int i) {
+  void remove_gather(int32_t i) {
     if (have_more())
       more()->gather_set.erase(i);
   }
@@ -552,7 +554,7 @@ public:
   void decode(bufferlist::iterator& p) {
     DECODE_START(2, p);
     ::decode(state, p);
-    set<int> g;
+    set<__s32> g;
     ::decode(g, p);
     if (!g.empty())
       more()->gather_set.swap(g);
@@ -576,13 +578,13 @@ public:
 
 
   // caps
-  bool is_loner_mode() {
+  bool is_loner_mode() const {
     return get_sm()->states[state].loner;
   }
-  int gcaps_allowed_ever() {
+  int gcaps_allowed_ever() const {
     return parent->is_auth() ? get_sm()->allowed_ever_auth : get_sm()->allowed_ever_replica;
   }
-  int gcaps_allowed(int who, int s=-1) {
+  int gcaps_allowed(int who, int s=-1) const {
     if (s < 0) s = state;
     if (parent->is_auth()) {
       if (get_xlock_by_client() >= 0 && who == CAP_XLOCKER)
@@ -594,14 +596,14 @@ public:
     } else 
       return get_sm()->states[s].replica_caps;
   }
-  int gcaps_careful() {
+  int gcaps_careful() const {
     if (get_num_wrlocks())
       return get_sm()->careful;
     return 0;
   }
 
 
-  int gcaps_xlocker_mask(client_t client) {
+  int gcaps_xlocker_mask(client_t client) const {
     if (client == get_xlock_by_client())
       return type->type == CEPH_LOCK_IFILE ? 0xf : (CEPH_CAP_GSHARED|CEPH_CAP_GEXCL);
     return 0;
@@ -667,6 +669,12 @@ public:
       out << " unstable";
     */
   }
+
+  /**
+   * Write bare values (caller must be in an object section)
+   * to formatter, or nothing if is_sync_and_unlocked.
+   */
+  void dump(Formatter *f) const;
 
   virtual void print(ostream& out) const {
     out << "(";

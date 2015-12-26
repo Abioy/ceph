@@ -18,9 +18,28 @@
 #include <errno.h>
 #include <vector>
 #include <algorithm>
+#include <ostream>
 
 #include "common/strtol.h"
 #include "ErasureCode.h"
+#include "include/buffer.h"
+
+const unsigned ErasureCode::SIMD_ALIGN = 32;
+
+int ErasureCode::sanity_check_k(int k, ostream *ss)
+{
+  if (k < 2) {
+    *ss << "k=" << k << " must be >= 2" << std::endl;
+    return -EINVAL;
+  } else {
+    return 0;
+  }
+}
+
+int ErasureCode::chunk_index(unsigned int i) const
+{
+  return chunk_mapping.size() > i ? chunk_mapping[i] : i;
+}
 
 int ErasureCode::minimum_to_decode(const set<int> &want_to_read,
                                    const set<int> &available_chunks,
@@ -54,22 +73,39 @@ int ErasureCode::minimum_to_decode_with_cost(const set<int> &want_to_read,
 }
 
 int ErasureCode::encode_prepare(const bufferlist &raw,
-                                bufferlist *prepared) const
+                                map<int, bufferlist> &encoded) const
 {
   unsigned int k = get_data_chunk_count();
   unsigned int m = get_chunk_count() - k;
   unsigned blocksize = get_chunk_size(raw.length());
-  unsigned padded_length = blocksize * k;
-  *prepared = raw;
-  if (padded_length - raw.length() > 0) {
-    bufferptr pad(padded_length - raw.length());
-    pad.zero();
-    prepared->push_back(pad);
+  unsigned padded_chunks = k - raw.length() / blocksize;
+  bufferlist prepared = raw;
+
+  for (unsigned int i = 0; i < k - padded_chunks; i++) {
+    bufferlist &chunk = encoded[chunk_index(i)];
+    chunk.substr_of(prepared, i * blocksize, blocksize);
+    chunk.rebuild_aligned_size_and_memory(blocksize, SIMD_ALIGN);
+    assert(chunk.is_contiguous());
   }
-  unsigned coding_length = blocksize * m;
-  bufferptr coding(buffer::create_page_aligned(coding_length));
-  prepared->push_back(coding);
-  prepared->rebuild_page_aligned();
+  if (padded_chunks) {
+    unsigned remainder = raw.length() - (k - padded_chunks) * blocksize;
+    bufferptr buf(buffer::create_aligned(blocksize, SIMD_ALIGN));
+
+    raw.copy((k - padded_chunks) * blocksize, remainder, buf.c_str());
+    buf.zero(remainder, blocksize - remainder);
+    encoded[chunk_index(k-padded_chunks)].push_back(buf);
+
+    for (unsigned int i = k - padded_chunks + 1; i < k; i++) {
+      bufferptr buf(buffer::create_aligned(blocksize, SIMD_ALIGN));
+      buf.zero();
+      encoded[chunk_index(i)].push_back(buf);
+    }
+  }
+  for (unsigned int i = k; i < k + m; i++) {
+    bufferlist &chunk = encoded[chunk_index(i)];
+    chunk.push_back(buffer::create_aligned(blocksize, SIMD_ALIGN));
+  }
+
   return 0;
 }
 
@@ -80,15 +116,9 @@ int ErasureCode::encode(const set<int> &want_to_encode,
   unsigned int k = get_data_chunk_count();
   unsigned int m = get_chunk_count() - k;
   bufferlist out;
-  int err = encode_prepare(in, &out);
+  int err = encode_prepare(in, *encoded);
   if (err)
     return err;
-  unsigned blocksize = get_chunk_size(in.length());
-  for (unsigned int i = 0; i < k + m; i++) {
-    int chunk_index = chunk_mapping.size() > 0 ? chunk_mapping[i] : i;
-    bufferlist &chunk = (*encoded)[chunk_index];
-    chunk.substr_of(out, i * blocksize, blocksize);
-  }
   encode_chunks(want_to_encode, encoded);
   for (unsigned int i = 0; i < k + m; i++) {
     if (want_to_encode.count(i) == 0)
@@ -128,11 +158,11 @@ int ErasureCode::decode(const set<int> &want_to_read,
   unsigned blocksize = (*chunks.begin()).second.length();
   for (unsigned int i =  0; i < k + m; i++) {
     if (chunks.find(i) == chunks.end()) {
-      bufferptr ptr(buffer::create_page_aligned(blocksize));
+      bufferptr ptr(buffer::create_aligned(blocksize, SIMD_ALIGN));
       (*decoded)[i].push_front(ptr);
     } else {
       (*decoded)[i] = chunks.find(i)->second;
-      (*decoded)[i].rebuild_page_aligned();
+      (*decoded)[i].rebuild_aligned(SIMD_ALIGN);
     }
   }
   return decode_chunks(want_to_read, chunks, decoded);
@@ -145,21 +175,21 @@ int ErasureCode::decode_chunks(const set<int> &want_to_read,
   assert("ErasureCode::decode_chunks not implemented" == 0);
 }
 
-int ErasureCode::parse(const map<std::string,std::string> &parameters,
+int ErasureCode::parse(const ErasureCodeProfile &profile,
 		       ostream *ss)
 {
-  return to_mapping(parameters, ss);
+  return to_mapping(profile, ss);
 }
 
 const vector<int> &ErasureCode::get_chunk_mapping() const {
   return chunk_mapping;
 }
 
-int ErasureCode::to_mapping(const map<std::string,std::string> &parameters,
+int ErasureCode::to_mapping(const ErasureCodeProfile &profile,
 			    ostream *ss)
 {
-  if (parameters.find("mapping") != parameters.end()) {
-    std::string mapping = parameters.find("mapping")->second;
+  if (profile.find("mapping") != profile.end()) {
+    std::string mapping = profile.find("mapping")->second;
     int position = 0;
     vector<int> coding_chunk_mapping;
     for(std::string::iterator it = mapping.begin(); it != mapping.end(); ++it) {
@@ -177,24 +207,22 @@ int ErasureCode::to_mapping(const map<std::string,std::string> &parameters,
 }
 
 int ErasureCode::to_int(const std::string &name,
-			const map<std::string,std::string> &parameters,
+			ErasureCodeProfile &profile,
 			int *value,
-			int default_value,
+			const std::string &default_value,
 			ostream *ss)
 {
-  if (parameters.find(name) == parameters.end() ||
-      parameters.find(name)->second.size() == 0) {
-    *value = default_value;
-    return 0;
-  }
-  std::string p = parameters.find(name)->second;
+  if (profile.find(name) == profile.end() ||
+      profile.find(name)->second.size() == 0)
+    profile[name] = default_value;
+  std::string p = profile.find(name)->second;
   std::string err;
   int r = strict_strtol(p.c_str(), 10, &err);
   if (!err.empty()) {
     *ss << "could not convert " << name << "=" << p
 	<< " to int because " << err
 	<< ", set to default " << default_value << std::endl;
-    *value = default_value;
+    *value = strict_strtol(default_value.c_str(), 10, &err);
     return -EINVAL;
   }
   *value = r;
@@ -202,18 +230,29 @@ int ErasureCode::to_int(const std::string &name,
 }
 
 int ErasureCode::to_bool(const std::string &name,
-			 const map<std::string,std::string> &parameters,
+			 ErasureCodeProfile &profile,
 			 bool *value,
-			 bool default_value,
+			 const std::string &default_value,
 			 ostream *ss)
 {
-  if (parameters.find(name) == parameters.end() ||
-      parameters.find(name)->second.size() == 0) {
-    *value = default_value;
-    return 0;
-  }
-  const std::string p = parameters.find(name)->second;
+  if (profile.find(name) == profile.end() ||
+      profile.find(name)->second.size() == 0)
+    profile[name] = default_value;
+  const std::string p = profile.find(name)->second;
   *value = (p == "yes") || (p == "true");
+  return 0;
+}
+
+int ErasureCode::to_string(const std::string &name,
+			   ErasureCodeProfile &profile,
+			   std::string *value,
+			   const std::string &default_value,
+			   ostream *ss)
+{
+  if (profile.find(name) == profile.end() ||
+      profile.find(name)->second.size() == 0)
+    profile[name] = default_value;
+  *value = profile[name];
   return 0;
 }
 
@@ -223,15 +262,13 @@ int ErasureCode::decode_concat(const map<int, bufferlist> &chunks,
   set<int> want_to_read;
 
   for (unsigned int i = 0; i < get_data_chunk_count(); i++) {
-    int chunk = chunk_mapping.size() > i ? chunk_mapping[i] : i;
-    want_to_read.insert(chunk);
+    want_to_read.insert(chunk_index(i));
   }
   map<int, bufferlist> decoded_map;
   int r = decode(want_to_read, chunks, &decoded_map);
   if (r == 0) {
     for (unsigned int i = 0; i < get_data_chunk_count(); i++) {
-      int chunk = chunk_mapping.size() > i ? chunk_mapping[i] : i;
-      decoded->claim_append(decoded_map[chunk]);
+      decoded->claim_append(decoded_map[chunk_index(i)]);
     }
   }
   return r;

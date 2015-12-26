@@ -99,6 +99,7 @@ class MMDSSlaveRequest : public Message {
   static const unsigned FLAG_NONBLOCK	= 1;
   static const unsigned FLAG_WOULDBLOCK	= 2;
   static const unsigned FLAG_NOTJOURNALED = 4;
+  static const unsigned FLAG_EROFS = 8;
 
   // for locking
   __u16 lock_type;  // lock object type
@@ -111,7 +112,7 @@ class MMDSSlaveRequest : public Message {
   // for rename prep
   filepath srcdnpath;
   filepath destdnpath;
-  set<__s32> witnesses;
+  set<mds_rank_t> witnesses;
   bufferlist inode_export;
   version_t inode_export_v;
   bufferlist srci_replica;
@@ -136,6 +137,8 @@ public:
   bool is_error_wouldblock() { return (flags & FLAG_WOULDBLOCK); }
   void mark_not_journaled() { flags |= FLAG_NOTJOURNALED; }
   bool is_not_journaled() { return (flags & FLAG_NOTJOURNALED); }
+  void mark_error_rofs() { flags |= FLAG_EROFS; }
+  bool is_error_rofs() { return (flags & FLAG_EROFS); }
 
   void set_lock_type(int t) { lock_type = t; }
 

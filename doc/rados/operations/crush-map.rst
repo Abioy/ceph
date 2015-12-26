@@ -47,10 +47,6 @@ A custom CRUSH map can also help you identify the physical locations where
 Ceph stores redundant copies of data when the placement group(s) associated
 with a failed host are in a degraded state.
 
-`Inktank`_ provides excellent premium support for developing CRUSH maps.
-
-.. _Inktank: http://www.inktank.com
-
 .. note:: Lines of code in example boxes may extend past the edge of the box. 
    Please scroll when reading or copying longer examples.
 
@@ -483,11 +479,7 @@ CRUSH maps support the notion of 'CRUSH rules', which are the rules that
 determine data placement for a pool. For large clusters, you will likely create
 many pools where each pool may have its own CRUSH ruleset and rules. The default
 CRUSH map has a rule for each pool, and one ruleset assigned to each of the
-default pools, which include:
-
-- ``data``
-- ``metadata``
-- ``rbd``
+default pools.
 
 .. note:: In most cases, you will not need to modify the default rules. When
    you create a new pool, its default ruleset is ``0``.
@@ -497,8 +489,8 @@ CRUSH rules deﬁnes placement and replication strategies or distribution polici
 that  allow you to specify exactly how CRUSH places object replicas. For
 example, you might create a rule selecting a pair of targets for 2-way
 mirroring, another rule for selecting three targets in two different data
-centers for 3-way mirroring, and yet another rule for RAID-4 over six storage
-devices. For a detailed discussion of CRUSH rules, refer to 
+centers for 3-way mirroring, and yet another rule for erasure coding over six
+storage devices. For a detailed discussion of CRUSH rules, refer to
 `CRUSH - Controlled, Scalable, Decentralized Placement of Replicated Data`_,
 and more specifically to **Section 3.2**.
 
@@ -507,7 +499,7 @@ A rule takes the following form::
 	rule <rulename> {
 	
 		ruleset <ruleset>
-		type [ replicated | raid4 ]
+		type [ replicated | erasure ]
 		min_size <min-size>
 		max_size <max-size>
 		step take <bucket-type>
@@ -538,7 +530,7 @@ A rule takes the following form::
 :Type: String
 :Required: Yes
 :Default: ``replicated``
-:Valid Values: Currently only ``replicated``
+:Valid Values: Currently only ``replicated`` and ``erasure``
 
 ``min_size``
 
@@ -1024,10 +1016,41 @@ CRUSH_TUNABLES3
    start with a non-zero value of r, based on how many attempts the
    parent has already made.  Legacy default is 0, but with this value
    CRUSH is sometimes unable to find a mapping.  The optimal value (in
-   terms of computational cost and correctness) is 1.  However, for
-   legacy clusters that have lots of existing data, changing from 0 to
-   1 will cause a lot of data to move; a value of 4 or 5 will allow
-   CRUSH to find a valid mapping but will make less data move.
+   terms of computational cost and correctness) is 1.
+
+   For existing clusters that have lots of existing data, changing
+   from 0 to 1 will cause a lot of data to move; a value of 4 or 5
+   will allow CRUSH to find a valid mapping but will make less data
+   move.
+
+CRUSH_V4
+--------
+
+ * Bucket type ``straw2``: The new ``straw2`` bucket type fixes
+   several limitations in the original ``straw`` bucket.
+   Specifically, the old ``straw`` buckets would change some mappings
+   that should have changed when a weight was adjusted, while
+   ``straw2`` achieves the original goal of only changing mappings to
+   or from the bucket item whose weight has changed.
+
+   Changing an existing bucket from ``straw`` to ``straw2`` is
+   possible but will result in a reasonably small amount of data
+   movement, depending on how much the bucket item weights vary from
+   each other.  When the weights are all the same no data will move,
+   and when item weights vary significantly there will be more
+   movement.
+
+CRUSH_TUNABLES5
+---------------
+
+ * ``chooseleaf_stable``: Whether a recursive chooseleaf attempt will
+   use a better value for an inner loop that greatly reduces the number
+   of mapping changes when an OSD is marked out.  The legacy value is 0,
+   while the new value of 1 uses the new approach.
+
+   Changing this value on an existing cluster will result in a very
+   large amount of data movement as almost every PG mapping is likely
+   to change.
 
 
 Which client versions support CRUSH_TUNABLES
@@ -1048,6 +1071,18 @@ Which client versions support CRUSH_TUNABLES3
 
  * v0.78 (firefly) or later
  * Linux kernel version v3.15 or later (for the file system and RBD kernel clients)
+
+Which client versions support CRUSH_V4
+--------------------------------------
+
+ * v0.94 (hammer) or later
+ * Linux kernel version v4.1 or later (for the file system and RBD kernel clients)
+
+Which client versions support CRUSH_TUNABLES5
+---------------------------------------------
+
+ * v10.0.2 (jewel) or later
+ * Linux kernel version v4.5 or later (for the file system and RBD kernel clients)
 
 Warning when tunables are non-optimal
 -------------------------------------
@@ -1079,7 +1114,7 @@ the default as of v0.73).  To make this warning go away, you have two options:
    For the change to take effect, you will need to restart the monitors, or
    apply the option to running monitors with::
 
-      ceph -- tell mon.\* injectargs --no-mon-warn-on-legacy-crush-tunables
+      ceph tell mon.\* injectargs --no-mon-warn-on-legacy-crush-tunables
 
 
 A few important points

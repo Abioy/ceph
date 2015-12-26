@@ -21,6 +21,7 @@ public:
   RGWGetObj_ObjStore_S3() {}
   ~RGWGetObj_ObjStore_S3() {}
 
+  int send_response_data_error();
   int send_response_data(bufferlist& bl, off_t ofs, off_t len);
 };
 
@@ -30,7 +31,7 @@ public:
   ~RGWListBuckets_ObjStore_S3() {}
 
   int get_params() {
-    limit = 0; /* no limit */
+    limit = -1; /* no limit */
     return 0;
   }
   virtual void send_response_begin(bool has_buckets);
@@ -47,6 +48,7 @@ public:
 
   int get_params();
   void send_response();
+  void send_versioned_response();
 };
 
 class RGWGetBucketLogging_ObjStore_S3 : public RGWGetBucketLogging {
@@ -62,6 +64,23 @@ public:
   RGWGetBucketLocation_ObjStore_S3() {}
   ~RGWGetBucketLocation_ObjStore_S3() {}
 
+  void send_response();
+};
+
+class RGWGetBucketVersioning_ObjStore_S3 : public RGWGetBucketVersioning {
+public:
+  RGWGetBucketVersioning_ObjStore_S3() {}
+  ~RGWGetBucketVersioning_ObjStore_S3() {}
+
+  void send_response();
+};
+
+class RGWSetBucketVersioning_ObjStore_S3 : public RGWSetBucketVersioning {
+public:
+  RGWSetBucketVersioning_ObjStore_S3() {}
+  ~RGWSetBucketVersioning_ObjStore_S3() {}
+
+  int get_params();
   void send_response();
 };
 
@@ -216,6 +235,23 @@ public:
   void send_response();
 };
 
+class RGWGetRequestPayment_ObjStore_S3 : public RGWGetRequestPayment {
+public:
+  RGWGetRequestPayment_ObjStore_S3() {}
+  ~RGWGetRequestPayment_ObjStore_S3() {}
+
+  void send_response();
+};
+
+class RGWSetRequestPayment_ObjStore_S3 : public RGWSetRequestPayment {
+public:
+  RGWSetRequestPayment_ObjStore_S3() {}
+  ~RGWSetRequestPayment_ObjStore_S3() {}
+
+  int get_params();
+  void send_response();
+};
+
 class RGWInitMultipart_ObjStore_S3 : public RGWInitMultipart_ObjStore {
 public:
   RGWInitMultipart_ObjStore_S3() {}
@@ -266,7 +302,8 @@ public:
 
   void send_status();
   void begin_response();
-  void send_partial_response(pair<string,int>& result);
+  void send_partial_response(rgw_obj_key& key, bool delete_marker,
+                             const string& marker_version_id, int ret);
   void end_response();
 };
 
@@ -353,7 +390,8 @@ public:
   virtual ~RGWHandler_ObjStore_S3() {}
 
   int validate_bucket_name(const string& bucket, bool relaxed_names);
-
+  using RGWHandler_ObjStore::validate_bucket_name;
+  
   virtual int init(RGWRados *store, struct req_state *state, RGWClientIO *cio);
   virtual int authorize() {
     return RGW_Auth_S3::authorize(store, s);
@@ -379,6 +417,9 @@ protected:
   }
   bool is_obj_update_op() {
     return is_acl_op() || is_cors_op();
+  }
+  bool is_request_payment_op() {
+    return s->info.args.exists("requestPayment");
   }
   RGWOp *get_obj_op(bool get_data);
 
@@ -422,9 +463,6 @@ public:
   RGWRESTMgr_S3() {}
   virtual ~RGWRESTMgr_S3() {}
 
-  virtual RGWRESTMgr *get_resource_mgr(struct req_state *s, const string& uri) {
-    return this;
-  }
   virtual RGWHandler *get_handler(struct req_state *s);
 };
 

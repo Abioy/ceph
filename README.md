@@ -26,26 +26,18 @@ contributed under the terms of the applicable license.
 Build Prerequisites
 ===================
 
-debian-based
-------------
+The list of Debian or RPM packages dependencies can be installed with:
 
-The list of debian package dependencies can be found in deps.deb.txt:
-
-	sudo apt-get install `cat deps.deb.txt`
+	./install-deps.sh
 
 Note: libsnappy-dev and libleveldb-dev are not available upstream for
-natty, oneiric, and squeeze.  Backports for Ceph can be found at
-ceph.com/debian-leveldb.
-
-rpm-based
----------
-
-The list of RPM package dependencies can be found in deps.rpm.txt:
-
-	sudo yum install `cat deps.rpm.txt`
+Debian Squeeze.  Backports for Ceph can be found at ceph.com/debian-leveldb.
 
 Building Ceph
 =============
+
+Autotools
+---------
 
 Developers, please refer to the [Developer
 Guide](doc/dev/quick_guide.rst) for more information, otherwise, you
@@ -57,6 +49,21 @@ following:
 	make
 
 (Note that the FUSE client will only be built if libfuse is present.)
+
+CMake
+-----
+
+Prerequisite:
+        CMake 2.8.11
+
+Build instructions:
+
+	mkdir build
+	cd build
+	cmake [options] /path/to/ceph/src/dir
+	make
+
+(Note that /path/to/ceph/src/dir can be in the tree and out of the tree)
 
 Dependencies
 ------------

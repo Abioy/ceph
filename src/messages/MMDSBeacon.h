@@ -21,8 +21,6 @@
 
 #include "mds/MDSMap.h"
 
-#include <uuid/uuid.h>
-
 
 
 /**
@@ -32,7 +30,13 @@
  */
 enum mds_metric_t {
   MDS_HEALTH_NULL = 0,
-  MDS_HEALTH_TRIM = 1
+  MDS_HEALTH_TRIM,
+  MDS_HEALTH_CLIENT_RECALL,
+  MDS_HEALTH_CLIENT_LATE_RELEASE,
+  MDS_HEALTH_CLIENT_RECALL_MANY,
+  MDS_HEALTH_CLIENT_LATE_RELEASE_MANY,
+  MDS_HEALTH_CLIENT_OLDEST_TID,
+  MDS_HEALTH_CLIENT_OLDEST_TID_MANY,
 };
 
 /**
@@ -74,6 +78,11 @@ struct MDSHealthMetric
     DECODE_FINISH(bl);
   }
 
+  bool operator==(MDSHealthMetric const &other) const
+  {
+    return (type == other.type && sev == other.sev && message == other.message);
+  }
+
   MDSHealthMetric() : type(MDS_HEALTH_NULL), sev(HEALTH_OK) {}
   MDSHealthMetric(mds_metric_t type_, health_status_t sev_, std::string const &message_)
     : type(type_), sev(sev_), message(message_) {}
@@ -100,46 +109,54 @@ struct MDSHealth
     ::decode(metrics, bl);
     DECODE_FINISH(bl);
   }
+
+  bool operator==(MDSHealth const &other) const
+  {
+    return metrics == other.metrics;
+  }
 };
 WRITE_CLASS_ENCODER(MDSHealth)
 
 
 class MMDSBeacon : public PaxosServiceMessage {
 
-  static const int HEAD_VERSION = 3;
+  static const int HEAD_VERSION = 4;
+  static const int COMPAT_VERSION = 2;
 
   uuid_d fsid;
-  uint64_t global_id;
+  mds_gid_t global_id;
   string name;
 
   MDSMap::DaemonState state;
   version_t seq;
-  __s32 standby_for_rank;
+  mds_rank_t standby_for_rank;
   string standby_for_name;
 
   CompatSet compat;
 
   MDSHealth health;
 
+  map<string, string> sys_info;
+
  public:
-  MMDSBeacon() : PaxosServiceMessage(MSG_MDS_BEACON, 0, HEAD_VERSION) { }
-  MMDSBeacon(const uuid_d &f, uint64_t g, string& n, epoch_t les, MDSMap::DaemonState st, version_t se) : 
-    PaxosServiceMessage(MSG_MDS_BEACON, les, HEAD_VERSION), 
+  MMDSBeacon() : PaxosServiceMessage(MSG_MDS_BEACON, 0, HEAD_VERSION, COMPAT_VERSION) { }
+  MMDSBeacon(const uuid_d &f, mds_gid_t g, string& n, epoch_t les, MDSMap::DaemonState st, version_t se) : 
+    PaxosServiceMessage(MSG_MDS_BEACON, les, HEAD_VERSION, COMPAT_VERSION),
     fsid(f), global_id(g), name(n), state(st), seq(se),
-    standby_for_rank(-1) {
+    standby_for_rank(MDS_RANK_NONE) {
   }
 private:
   ~MMDSBeacon() {}
 
 public:
   uuid_d& get_fsid() { return fsid; }
-  uint64_t get_global_id() { return global_id; }
+  mds_gid_t get_global_id() { return global_id; }
   string& get_name() { return name; }
   epoch_t get_last_epoch_seen() { return version; }
   MDSMap::DaemonState get_state() { return state; }
   version_t get_seq() { return seq; }
   const char *get_type_name() const { return "mdsbeacon"; }
-  int get_standby_for_rank() { return standby_for_rank; }
+  mds_rank_t get_standby_for_rank() { return standby_for_rank; }
   const string& get_standby_for_name() { return standby_for_name; }
 
   CompatSet const& get_compat() const { return compat; }
@@ -148,9 +165,12 @@ public:
   MDSHealth const& get_health() const { return health; }
   void set_health(const MDSHealth &h) { health = h; }
 
-  void set_standby_for_rank(int r) { standby_for_rank = r; }
+  void set_standby_for_rank(mds_rank_t r) { standby_for_rank = r; }
   void set_standby_for_name(string& n) { standby_for_name = n; }
   void set_standby_for_name(const char* c) { standby_for_name.assign(c); }
+
+  const map<string, string>& get_sys_info() const { return sys_info; }
+  void set_sys_info(const map<string, string>& i) { sys_info = i; }
 
   void print(ostream& out) const {
     out << "mdsbeacon(" << global_id << "/" << name << " " << ceph_mds_state_name(state) 
@@ -168,6 +188,9 @@ public:
     ::encode(standby_for_name, payload);
     ::encode(compat, payload);
     ::encode(health, payload);
+    if (state == MDSMap::STATE_BOOT) {
+      ::encode(sys_info, payload);
+    }
   }
   void decode_payload() {
     bufferlist::iterator p = payload.begin();
@@ -183,6 +206,10 @@ public:
       ::decode(compat, p);
     if (header.version >= 3) {
       ::decode(health, p);
+    }
+    if (state == MDSMap::STATE_BOOT &&
+	header.version >= 4) {
+      ::decode(sys_info, p);
     }
   }
 };

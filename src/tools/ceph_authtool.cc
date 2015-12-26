@@ -55,22 +55,24 @@ int main(int argc, const char **argv)
   argv_to_vec(argc, argv, args);
   env_to_vec(args);
 
-  bool gen_key = false;
-  bool gen_print_key = false;
   std::string add_key;
-  bool list = false;
-  bool print_key = false;
-  bool create_keyring = false;
   std::string caps_fn;
   std::string import_keyring;
-  bool set_auid = false;
   uint64_t auid = CEPH_AUTH_UID_DEFAULT;
   map<string,bufferlist> caps;
   std::string fn;
 
   global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT, CODE_ENVIRONMENT_UTILITY,
 	      CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
+
+  bool gen_key = false;
+  bool gen_print_key = false;
+  bool list = false;
+  bool print_key = false;
+  bool create_keyring = false;
+  bool set_auid = false;
   std::vector<const char*>::iterator i;
+
   for (i = args.begin(); i != args.end(); ) {
     std::string val;
     if (ceph_argparse_double_dash(args, i)) {
@@ -135,7 +137,7 @@ int main(int argc, const char **argv)
   if (gen_key && (!add_key.empty())) {
     cerr << "can't both gen_key and add_key" << std::endl;
     usage();
-  }	
+  }
 
   common_init_finish(g_ceph_context);
   EntityName ename(g_conf->name);
@@ -143,7 +145,7 @@ int main(int argc, const char **argv)
   if (gen_print_key) {
     CryptoKey key;
     key.create(g_ceph_context, CEPH_CRYPTO_AES);
-    cout << key << std::endl;    
+    cout << key << std::endl;
     return 0;
   }
 
@@ -187,7 +189,7 @@ int main(int argc, const char **argv)
 	cerr << "error reading file " << import_keyring << std::endl;
 	exit(1);
       }
-      
+
       cout << "importing contents of " << import_keyring << " into " << fn << std::endl;
       //other.print(cout);
       keyring.import(g_ceph_context, other);
@@ -228,10 +230,10 @@ int main(int argc, const char **argv)
     for (int i=0; key_names[i]; i++) {
       std::string val;
       if (cf.read("global", key_names[i], val) == 0) {
-        bufferlist bl;
-        ::encode(val, bl);
-        string s(key_names[i]);
-        caps[s] = bl; 
+	bufferlist bl;
+	::encode(val, bl);
+	string s(key_names[i]);
+	caps[s] = bl;
       }
     }
     keyring.set_caps(ename, caps);
@@ -248,7 +250,12 @@ int main(int argc, const char **argv)
 
   // read commands
   if (list) {
-    keyring.print(cout);
+    try {
+      keyring.print(cout);
+    } catch (ceph::buffer::end_of_buffer &eob) {
+      cout << "Exception (end_of_buffer) in print(), exit." << std::endl;
+      exit(1);
+    }
   }
   if (print_key) {
     CryptoKey key;
@@ -256,6 +263,7 @@ int main(int argc, const char **argv)
       cout << key << std::endl;
     } else {
       cerr << "entity " << ename << " not found" << std::endl;
+      exit(1);
     }
   }
 
@@ -266,9 +274,9 @@ int main(int argc, const char **argv)
     r = bl.write_file(fn.c_str(), 0600);
     if (r < 0) {
       cerr << "could not write " << fn << std::endl;
+      exit(1);
     }
     //cout << "wrote " << bl.length() << " bytes to " << fn << std::endl;
   }
-
   return 0;
 }

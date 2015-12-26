@@ -29,9 +29,9 @@ enum {
   l_throttle_last,
 };
 
-Throttle::Throttle(CephContext *cct, std::string n, int64_t m, bool _use_perf)
+Throttle::Throttle(CephContext *cct, const std::string& n, int64_t m, bool _use_perf)
   : cct(cct), name(n), logger(NULL),
-		max(m),
+    max(m),
     lock("Throttle::lock"),
     use_perf(_use_perf)
 {
@@ -42,17 +42,17 @@ Throttle::Throttle(CephContext *cct, std::string n, int64_t m, bool _use_perf)
 
   if (cct->_conf->throttler_perf_counter) {
     PerfCountersBuilder b(cct, string("throttle-") + name, l_throttle_first, l_throttle_last);
-    b.add_u64_counter(l_throttle_val, "val");
-    b.add_u64_counter(l_throttle_max, "max");
-    b.add_u64_counter(l_throttle_get, "get");
-    b.add_u64_counter(l_throttle_get_sum, "get_sum");
-    b.add_u64_counter(l_throttle_get_or_fail_fail, "get_or_fail_fail");
-    b.add_u64_counter(l_throttle_get_or_fail_success, "get_or_fail_success");
-    b.add_u64_counter(l_throttle_take, "take");
-    b.add_u64_counter(l_throttle_take_sum, "take_sum");
-    b.add_u64_counter(l_throttle_put, "put");
-    b.add_u64_counter(l_throttle_put_sum, "put_sum");
-    b.add_time_avg(l_throttle_wait, "wait");
+    b.add_u64(l_throttle_val, "val", "Currently available throttle");
+    b.add_u64(l_throttle_max, "max", "Max value for throttle");
+    b.add_u64_counter(l_throttle_get, "get", "Gets");
+    b.add_u64_counter(l_throttle_get_sum, "get_sum", "Got data");
+    b.add_u64_counter(l_throttle_get_or_fail_fail, "get_or_fail_fail", "Get blocked during get_or_fail");
+    b.add_u64_counter(l_throttle_get_or_fail_success, "get_or_fail_success", "Successful get during get_or_fail");
+    b.add_u64_counter(l_throttle_take, "take", "Takes");
+    b.add_u64_counter(l_throttle_take_sum, "take_sum", "Taken data");
+    b.add_u64_counter(l_throttle_put, "put", "Puts");
+    b.add_u64_counter(l_throttle_put_sum, "put_sum", "Put data");
+    b.add_time_avg(l_throttle_wait, "wait", "Waiting latency");
 
     logger = b.create_perf_counters();
     cct->get_perfcounters_collection()->add(logger);
@@ -80,6 +80,8 @@ Throttle::~Throttle()
 void Throttle::_reset_max(int64_t m)
 {
   assert(lock.is_locked());
+  if ((int64_t)max.read() == m)
+    return;
   if (!cond.empty())
     cond.front()->SignalOne();
   if (logger)
@@ -124,7 +126,7 @@ bool Throttle::_wait(int64_t c)
 
 bool Throttle::wait(int64_t m)
 {
-  if (0 == max.read()) {
+  if (0 == max.read() && 0 == m) {
     return false;
   }
 
@@ -158,7 +160,7 @@ int64_t Throttle::take(int64_t c)
 
 bool Throttle::get(int64_t c, int64_t m)
 {
-  if (0 == max.read()) {
+  if (0 == max.read() && 0 == m) {
     return false;
   }
 
@@ -267,10 +269,102 @@ void SimpleThrottle::end_op(int r)
   m_cond.Signal();
 }
 
+bool SimpleThrottle::pending_error() const
+{
+  Mutex::Locker l(m_lock);
+  return (m_ret < 0);
+}
+
 int SimpleThrottle::wait_for_ret()
 {
   Mutex::Locker l(m_lock);
   while (m_current > 0)
     m_cond.Wait(m_lock);
   return m_ret;
+}
+
+void C_OrderedThrottle::finish(int r) {
+  m_ordered_throttle->finish_op(m_tid, r);
+}
+
+OrderedThrottle::OrderedThrottle(uint64_t max, bool ignore_enoent)
+  : m_lock("OrderedThrottle::m_lock"), m_max(max), m_current(0), m_ret_val(0),
+    m_ignore_enoent(ignore_enoent), m_next_tid(0), m_complete_tid(0) {
+}
+
+C_OrderedThrottle *OrderedThrottle::start_op(Context *on_finish) {
+  assert(on_finish != NULL);
+
+  Mutex::Locker locker(m_lock);
+  uint64_t tid = m_next_tid++;
+  m_tid_result[tid] = Result(on_finish);
+  C_OrderedThrottle *ctx = new C_OrderedThrottle(this, tid);
+
+  complete_pending_ops();
+  while (m_max == m_current) {
+    m_cond.Wait(m_lock);
+    complete_pending_ops();
+  }
+  ++m_current;
+
+  return ctx;
+}
+
+void OrderedThrottle::end_op(int r) {
+  Mutex::Locker locker(m_lock);
+  assert(m_current > 0);
+
+  if (r < 0 && m_ret_val == 0 && (r != -ENOENT || !m_ignore_enoent)) {
+    m_ret_val = r;
+  }
+  --m_current;
+  m_cond.Signal();
+}
+
+void OrderedThrottle::finish_op(uint64_t tid, int r) {
+  Mutex::Locker locker(m_lock);
+
+  TidResult::iterator it = m_tid_result.find(tid);
+  assert(it != m_tid_result.end());
+
+  it->second.finished = true;
+  it->second.ret_val = r;
+  m_cond.Signal();
+}
+
+bool OrderedThrottle::pending_error() const {
+  Mutex::Locker locker(m_lock);
+  return (m_ret_val < 0);
+}
+
+int OrderedThrottle::wait_for_ret() {
+  Mutex::Locker locker(m_lock);
+  complete_pending_ops();
+
+  while (m_current > 0) {
+    m_cond.Wait(m_lock);
+    complete_pending_ops();
+  }
+  return m_ret_val;
+}
+
+void OrderedThrottle::complete_pending_ops() {
+  assert(m_lock.is_locked());
+
+  while (true) {
+    TidResult::iterator it = m_tid_result.begin();
+    if (it == m_tid_result.end() || it->first != m_complete_tid ||
+        !it->second.finished) {
+      break;
+    }
+
+    Result result = it->second;
+    m_tid_result.erase(it);
+
+    m_lock.Unlock();
+    result.on_finish->complete(result.ret_val);
+    m_lock.Lock();
+
+    ++m_complete_tid;
+  }
 }

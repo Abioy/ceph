@@ -138,7 +138,6 @@ void parse_syn_options(vector<const char*>& args)
         syn_iargs.push_back( atoi(args[++i]) );
         syn_iargs.push_back( atoi(args[++i]) );
         syn_iargs.push_back( atoi(args[++i]) );
-
       } else if (strcmp(args[i],"makefiles") == 0) {
         syn_modes.push_back( SYNCLIENT_MODE_MAKEFILES );
         syn_iargs.push_back( atoi(args[++i]) );
@@ -158,7 +157,6 @@ void parse_syn_options(vector<const char*>& args)
         syn_modes.push_back( SYNCLIENT_MODE_OPENSHARED );
         syn_iargs.push_back( atoi(args[++i]) );
         syn_iargs.push_back( atoi(args[++i]) );
-
       } else if (strcmp(args[i],"createobjects") == 0) {
         syn_modes.push_back( SYNCLIENT_MODE_CREATEOBJECTS );
         syn_iargs.push_back( atoi(args[++i]) );
@@ -172,14 +170,12 @@ void parse_syn_options(vector<const char*>& args)
         syn_iargs.push_back( atoi(args[++i]) );
         syn_iargs.push_back( atoi(args[++i]) );
         syn_iargs.push_back( atoi(args[++i]) );
-
       } else if (strcmp(args[i],"walk") == 0) {
         syn_modes.push_back( SYNCLIENT_MODE_FULLWALK );
         //syn_sargs.push_back( atoi(args[++i]) );
       } else if (strcmp(args[i],"randomwalk") == 0) {
         syn_modes.push_back( SYNCLIENT_MODE_RANDOMWALK );
         syn_iargs.push_back( atoi(args[++i]) );       
-
       } else if (strcmp(args[i],"trace") == 0) {
         syn_modes.push_back( SYNCLIENT_MODE_TRACE );
         syn_sargs.push_back( args[++i] );
@@ -196,10 +192,8 @@ void parse_syn_options(vector<const char*>& args)
         syn_iargs.push_back( atoi(args[++i]) );
         syn_iargs.push_back( atoi(args[++i]) );
         syn_iargs.push_back( atoi(args[++i]) );
-
       } else if (strcmp(args[i],"foo") == 0) {
         syn_modes.push_back( SYNCLIENT_MODE_FOO );
-
       } else if (strcmp(args[i],"until") == 0) {
         syn_modes.push_back( SYNCLIENT_MODE_UNTIL );
         syn_iargs.push_back( atoi(args[++i]) );
@@ -213,21 +207,18 @@ void parse_syn_options(vector<const char*>& args)
         syn_modes.push_back( SYNCLIENT_MODE_ONLYRANGE );
         syn_iargs.push_back( atoi(args[++i]) );
         syn_iargs.push_back( atoi(args[++i]) );
-        
       } else if (strcmp(args[i],"sleep") == 0) { 
         syn_modes.push_back( SYNCLIENT_MODE_SLEEP );
         syn_iargs.push_back( atoi(args[++i]) );
       } else if (strcmp(args[i],"randomsleep") == 0) { 
         syn_modes.push_back( SYNCLIENT_MODE_RANDOMSLEEP );
         syn_iargs.push_back( atoi(args[++i]) );
-
       } else if (strcmp(args[i],"opentest") == 0) { 
         syn_modes.push_back( SYNCLIENT_MODE_OPENTEST );
         syn_iargs.push_back( atoi(args[++i]) );
       } else if (strcmp(args[i],"optest") == 0) {
 	syn_modes.push_back( SYNCLIENT_MODE_OPTEST );
         syn_iargs.push_back( atoi(args[++i]) );
-
       } else if (strcmp(args[i],"truncate") == 0) { 
         syn_modes.push_back( SYNCLIENT_MODE_TRUNCATE );
 	syn_sargs.push_back(args[++i]);
@@ -237,7 +228,6 @@ void parse_syn_options(vector<const char*>& args)
 	syn_sargs.push_back(args[++i]);
 	syn_sargs.push_back(args[++i]);
 	syn_iargs.push_back(atoi(args[++i]));
-
       } else if (strcmp(args[i], "lookuphash") == 0) {
 	syn_modes.push_back(SYNCLIENT_MODE_LOOKUPHASH);
 	syn_sargs.push_back(args[++i]);
@@ -246,7 +236,6 @@ void parse_syn_options(vector<const char*>& args)
       } else if (strcmp(args[i], "lookupino") == 0) {
 	syn_modes.push_back(SYNCLIENT_MODE_LOOKUPINO);
 	syn_sargs.push_back(args[++i]);
-
       } else if (strcmp(args[i], "chunkfile") == 0) {
 	syn_modes.push_back(SYNCLIENT_MODE_CHUNK);
 	syn_sargs.push_back(args[++i]);
@@ -612,7 +601,7 @@ int SyntheticClient::run()
         int size = iargs.front();  iargs.pop_front();
         int inflight = iargs.front();  iargs.pop_front();
         if (run_me()) {
-          dout(2) << "createobjects " << cout << " of " << size << " bytes"
+          dout(2) << "createobjects " << count << " of " << size << " bytes"
 		  << ", " << inflight << " in flight" << dendl;
           create_objects(count, size, inflight);
         }
@@ -628,7 +617,7 @@ int SyntheticClient::run()
         int rskew = iargs.front();  iargs.pop_front();
         int wskew = iargs.front();  iargs.pop_front();
         if (run_me()) {
-          dout(2) << "objectrw " << cout << " " << size << " " << wrpc 
+          dout(2) << "objectrw " << count << " " << size << " " << wrpc 
 		  << " " << overlap << " " << rskew << " " << wskew << dendl;
           object_rw(count, size, wrpc, overlap, rskew, wskew);
         }
@@ -1139,7 +1128,10 @@ int SyntheticClient::play_trace(Trace& t, string& prefix, bool metadata_only)
     } else if (strcmp(op, "getdir") == 0) {
       const char *a = t.get_string(buf, p);
       list<string> contents;
-      client->getdir(a, contents);
+      int r = client->getdir(a, contents);
+      if (r < 0) {
+        dout(1) << "getdir on " << a << " returns " << r << dendl;
+      }
     } else if (strcmp(op, "opendir") == 0) {
       const char *a = t.get_string(buf, p);
       int64_t b = t.get_int();
@@ -1449,7 +1441,7 @@ int SyntheticClient::play_trace(Trace& t, string& prefix, bool metadata_only)
       lock.Lock();
       object_locator_t oloc(SYNCLIENT_FIRST_POOL);
       uint64_t size;
-      utime_t mtime;
+      ceph::real_time mtime;
       client->objecter->stat(oid, oloc, CEPH_NOSNAP, &size, &mtime, 0, new C_SafeCond(&lock, &cond, &ack));
       while (!ack) cond.Wait(lock);
       lock.Unlock();
@@ -1479,7 +1471,8 @@ int SyntheticClient::play_trace(Trace& t, string& prefix, bool metadata_only)
       bufferlist bl;
       bl.push_back(bp);
       SnapContext snapc;
-      client->objecter->write(oid, oloc, off, len, snapc, bl, ceph_clock_now(client->cct), 0,
+      client->objecter->write(oid, oloc, off, len, snapc, bl,
+			      ceph::real_clock::now(client->cct), 0,
 			      new C_SafeCond(&lock, &cond, &ack),
 			      safeg.new_sub());
       safeg.activate();
@@ -1495,7 +1488,8 @@ int SyntheticClient::play_trace(Trace& t, string& prefix, bool metadata_only)
       object_locator_t oloc(SYNCLIENT_FIRST_POOL);
       lock.Lock();
       SnapContext snapc;
-      client->objecter->zero(oid, oloc, off, len, snapc, ceph_clock_now(client->cct), 0,
+      client->objecter->zero(oid, oloc, off, len, snapc,
+			     ceph::real_clock::now(client->cct), 0,
 			     new C_SafeCond(&lock, &cond, &ack),
 			     safeg.new_sub());
       safeg.activate();
@@ -1558,7 +1552,7 @@ int SyntheticClient::clean_dir(string& basedir)
   list<string> contents;
   int r = client->getdir(basedir.c_str(), contents);
   if (r < 0) {
-    dout(1) << "readdir on " << basedir << " returns " << r << dendl;
+    dout(1) << "getdir on " << basedir << " returns " << r << dendl;
     return r;
   }
 
@@ -1617,7 +1611,7 @@ int SyntheticClient::full_walk(string& basedir)
     list<string> contents;
     int r = client->getdir(dir.c_str(), contents);
     if (r < 0) {
-      dout(1) << "readdir on " << dir << " returns " << r << dendl;
+      dout(1) << "getdir on " << dir << " returns " << r << dendl;
       continue;
     }
     
@@ -1644,7 +1638,7 @@ int SyntheticClient::full_walk(string& basedir)
 	actual.nsubdirs++;
       else
 	actual.nfiles++;
-      
+
       // print
       char *tm = ctime(&st.st_mtime);
       tm[strlen(tm)-1] = 0;
@@ -1812,7 +1806,7 @@ int SyntheticClient::read_dirs(const char *basedir, int dirs, int files, int dep
   utime_t e = ceph_clock_now(client->cct);
   e -= s;
   if (r < 0) {
-    dout(0) << "read_dirs couldn't readdir " << basedir << ", stopping" << dendl;
+    dout(0) << "getdir couldn't readdir " << basedir << ", stopping" << dendl;
     return -1;
   }
 
@@ -2174,13 +2168,11 @@ int SyntheticClient::read_file(const std::string& fn, int size,
     // verify fingerprint
     int bad = 0;
     uint64_t *p = (uint64_t*)buf;
-    uint64_t readoff;
-    int64_t readclient;
     while ((char*)p + 32 < buf + rdsize) {
-      readoff = *p;
+      uint64_t readoff = *p;
       uint64_t wantoff = (uint64_t)i*(uint64_t)rdsize + (uint64_t)((char*)p - buf);
       p++;
-      readclient = *p;
+      int64_t readclient = *p;
       p++;
       if (readoff != wantoff ||
 	  readclient != client->get_nodeid()) {
@@ -2274,10 +2266,11 @@ int SyntheticClient::create_objects(int nobj, int osize, int inflight)
       dout(6) << "create_objects " << i << "/" << (nobj+1) << dendl;
     }
     dout(10) << "writing " << oid << dendl;
-    
+
     starts.push_back(ceph_clock_now(client->cct));
     client->client_lock.Lock();
-    client->objecter->write(oid, oloc, 0, osize, snapc, bl, ceph_clock_now(client->cct), 0,
+    client->objecter->write(oid, oloc, 0, osize, snapc, bl,
+			    ceph::real_clock::now(client->cct), 0,
 			    new C_Ref(lock, cond, &unack),
 			    new C_Ref(lock, cond, &unsafe));
     client->client_lock.Unlock();
@@ -2325,8 +2318,6 @@ int SyntheticClient::object_rw(int nobj, int osize, int wrpc,
   bufferlist bl;
   bl.push_back(bp);
 
-  bool do_sync = false;
-
   // start with odd number > nobj
   rjhash<uint32_t> h;
   unsigned prime = nobj + 1;             // this is the minimum!
@@ -2348,7 +2339,6 @@ int SyntheticClient::object_rw(int nobj, int osize, int wrpc,
   Cond cond;
 
   int unack = 0;
-  int unsafe = 0;
 
   while (1) {
     if (time_to_stop()) break;
@@ -2383,16 +2373,9 @@ int SyntheticClient::object_rw(int nobj, int osize, int wrpc,
       op.op.extent.length = osize;
       op.indata = bl;
       m.ops.push_back(op);
-      if (do_sync) {
-        OSDOp op;
-        op.op.op = CEPH_OSD_OP_STARTSYNC;
-	m.ops.push_back(op);
-      }
-      client->objecter->mutate(oid, oloc, m, snapc, ceph_clock_now(client->cct), 0,
+      client->objecter->mutate(oid, oloc, m, snapc,
+			       ceph::real_clock::now(client->cct), 0,
 			       NULL, new C_Ref(lock, cond, &unack));
-      /*client->objecter->write(oid, layout, 0, osize, snapc, bl, 0,
-			      new C_Ref(lock, cond, &unack),
-			      new C_Ref(lock, cond, &unsafe));*/
     } else {
       dout(10) << "read from " << oid << dendl;
       bufferlist inbl;
@@ -2410,21 +2393,8 @@ int SyntheticClient::object_rw(int nobj, int osize, int wrpc,
 
     utime_t lat = ceph_clock_now(client->cct);
     lat -= start;
-    if (client->logger) {
-      if (write) 
-	client->logger->tset(l_c_owrlat, lat);
-      else 
-	client->logger->tset(l_c_ordlat, lat);
-    }
   }
 
-
-  lock.Lock();
-  while (unsafe > 0) {
-    dout(10) << "waiting for " << unsafe << " unsafe" << dendl;
-    cond.Wait(lock);
-  }
-  lock.Unlock();
   return 0;
 }
 
@@ -2434,7 +2404,7 @@ int SyntheticClient::object_rw(int nobj, int osize, int wrpc,
 
 int SyntheticClient::read_random(string& fn, int size, int rdsize)   // size is in MB, wrsize in bytes
 {
-  __uint64_t chunks = (__uint64_t)size * (__uint64_t)(1024*1024) / (__uint64_t)rdsize;
+  uint64_t chunks = (uint64_t)size * (uint64_t)(1024*1024) / (uint64_t)rdsize;
 
   int fd = client->open(fn.c_str(), O_RDWR);
   dout(5) << "reading from " << fn << " fd " << fd << dendl;
@@ -2512,7 +2482,7 @@ int SyntheticClient::read_random(string& fn, int size, int rdsize)   // size is 
       //{
 
       offset=(rand())%(chunks+1);
-    __uint64_t *p = (__uint64_t*)buf;
+    uint64_t *p = (uint64_t*)buf;
     while ((char*)p < buf + rdsize) {
       *p = offset*rdsize + (char*)p - buf;      
       p++;
@@ -2530,11 +2500,11 @@ int SyntheticClient::read_random(string& fn, int size, int rdsize)   // size is 
     if ( read )
     {
     int bad = 0;
-    __int64_t *p = (__int64_t*)buf;
-    __int64_t readoff, readclient;
+    int64_t *p = (int64_t*)buf;
+    int64_t readoff, readclient;
     while ((char*)p + 32 < buf + rdsize) {
       readoff = *p;
-      __int64_t wantoff = offset*rdsize + (__int64_t)((char*)p - buf);
+      int64_t wantoff = offset*rdsize + (int64_t)((char*)p - buf);
       p++;
       readclient = *p;
       p++;
@@ -2607,7 +2577,7 @@ int normdist(int min, int max, int stdev) /* specifies input values */
 
 int SyntheticClient::read_random_ex(string& fn, int size, int rdsize)   // size is in MB, wrsize in bytes
 {
-  __uint64_t chunks = (__uint64_t)size * (__uint64_t)(1024*1024) / (__uint64_t)rdsize;
+  uint64_t chunks = (uint64_t)size * (uint64_t)(1024*1024) / (uint64_t)rdsize;
   
   int fd = client->open(fn.c_str(), O_RDWR);
   dout(5) << "reading from " << fn << " fd " << fd << dendl;
@@ -2694,7 +2664,7 @@ int SyntheticClient::read_random_ex(string& fn, int size, int rdsize)   // size 
 	  {
 	    
 	    offset=(rand())%(chunks+1);
-	    __uint64_t *p = (__uint64_t*)buf;
+	    uint64_t *p = (uint64_t*)buf;
 	    while ((char*)p < buf + rdsize) {
 	      *p = offset*rdsize + (char*)p - buf;      
 	      p++;
@@ -2712,11 +2682,11 @@ int SyntheticClient::read_random_ex(string& fn, int size, int rdsize)   // size 
     if ( read )
       {
 	int bad = 0;
-	__int64_t *p = (__int64_t*)buf;
-	__int64_t readoff, readclient;
+	int64_t *p = (int64_t*)buf;
+	int64_t readoff, readclient;
 	while ((char*)p + 32 < buf + rdsize) {
 	  readoff = *p;
-	  __int64_t wantoff = offset*rdsize + (__int64_t)((char*)p - buf);
+	  int64_t wantoff = offset*rdsize + (int64_t)((char*)p - buf);
 	  p++;
 	  readclient = *p;
 	  p++;

@@ -38,7 +38,7 @@ public:
     entity_addr_t sample_addr;
     uuid_d sample_uuid;
     for (int i = 0; i < num_osds; ++i) {
-      sample_uuid.uuid[i] = i;
+      sample_uuid.generate_random();
       sample_addr.nonce = i;
       pending_inc.new_state[i] = CEPH_OSD_EXISTS | CEPH_OSD_NEW;
       pending_inc.new_up_client[i] = sample_addr;
@@ -306,7 +306,7 @@ TEST_F(OSDMapTest, KeepsNecessaryTemps) {
     }
   }
   if (i == (int)get_num_osds())
-    ASSERT_EQ(0, "did not find unused OSD for temp mapping");
+    FAIL() << "did not find unused OSD for temp mapping";
 
   pgtemp_map.new_pg_temp[pgid] = up_osds;
   pgtemp_map.new_primary_temp[pgid] = up_osds[1];
@@ -324,7 +324,7 @@ TEST_F(OSDMapTest, PrimaryAffinity) {
 
   /*
   osdmap.print(cout);
-  Formatter *f = new_formatter("json-pretty");
+  Formatter *f = Formatter::create("json-pretty");
   f->open_object_section("CRUSH");
   osdmap.crush->dump(f);
   f->close_section();

@@ -30,18 +30,24 @@ typedef enum {
   CLOG_SEC = 2,
   CLOG_WARN = 3,
   CLOG_ERROR = 4,
+  CLOG_UNKNOWN = -1,
 } clog_type;
 
 static const std::string CLOG_CHANNEL_NONE    = "none";
-static const std::string CLOG_CHANNEL_DEFAULT = "default";
+static const std::string CLOG_CHANNEL_DEFAULT = "cluster";
 static const std::string CLOG_CHANNEL_CLUSTER = "cluster";
 static const std::string CLOG_CHANNEL_AUDIT   = "audit";
+
+// this is the key name used in the config options for the default, e.g.
+//   default=true foo=false bar=false
+static const std::string CLOG_CONFIG_DEFAULT_KEY = "default";
 
 /*
  * Given a clog log_type, return the equivalent syslog priority
  */
 int clog_type_to_syslog_level(clog_type t);
 
+clog_type string_to_clog_type(const string& s);
 int string_to_syslog_level(string s);
 int string_to_syslog_facility(string s);
 
@@ -74,6 +80,8 @@ struct LogEntry {
   clog_type prio;
   string msg;
   string channel;
+
+  LogEntry() : seq(0), prio(CLOG_DEBUG) {}
 
   LogEntryKey key() const { return LogEntryKey(who, stamp, seq); }
 
@@ -120,12 +128,12 @@ inline ostream& operator<<(ostream& out, clog_type t)
     return out << "[DBG]";
   case CLOG_INFO:
     return out << "[INF]";
+  case CLOG_SEC:
+    return out << "[SEC]";
   case CLOG_WARN:
     return out << "[WRN]";
   case CLOG_ERROR:
     return out << "[ERR]";
-  case CLOG_SEC:
-    return out << "[SEC]";
   default:
     return out << "[???]";
   }

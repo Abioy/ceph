@@ -33,21 +33,22 @@
 #undef dout_prefix
 #define dout_prefix *_dout << "auth: "
 
-using std::auto_ptr;
 using namespace std;
 
 int KeyRing::from_ceph_context(CephContext *cct)
 {
   const md_config_t *conf = cct->_conf;
-
-  int ret = -ENOENT;
   string filename;
 
-  if (ceph_resolve_file_search(conf->keyring, filename)) {
+  int ret = ceph_resolve_file_search(conf->keyring, filename);
+  if (!ret) {
     ret = load(cct, filename);
     if (ret < 0)
       lderr(cct) << "failed to load " << filename
 		 << ": " << cpp_strerror(ret) << dendl;
+  } else {
+    lderr(cct) << "unable to find a keyring on " << conf->keyring
+	       << ": " << cpp_strerror(ret) << dendl;
   }
 
   if (!conf->key.empty()) {
@@ -145,6 +146,8 @@ void KeyRing::encode_formatted(string label, Formatter *f, bufferlist& bl)
     std::ostringstream keyss;
     keyss << p->second.key;
     f->dump_string("key", keyss.str());
+    if (p->second.auid != CEPH_AUTH_UID_DEFAULT)
+      f->dump_int("auid", p->second.auid);
     f->open_object_section("caps");
     for (map<string, bufferlist>::iterator q = p->second.caps.begin();
  	 q != p->second.caps.end();

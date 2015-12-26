@@ -210,28 +210,36 @@ public:
     const ContDesc &cont, map<uint64_t, uint64_t> &out);
   uint64_t get_length(const ContDesc &in) {
     RandWrap rand(in.seqnum);
-    return (rand() % max_length);
+    if (max_length == 0)
+      return 0;
+    return (rand() % (max_length/2)) + ((max_length - 1)/2) + 1;
   }
 };
 
 class AttrGenerator : public RandGenerator {
   uint64_t max_len;
+  uint64_t big_max_len;
 public:
-  AttrGenerator(uint64_t max_len) : max_len(max_len) {}
+  AttrGenerator(uint64_t max_len, uint64_t big_max_len)
+    : max_len(max_len), big_max_len(big_max_len) {}
   void get_ranges_map(
     const ContDesc &cont, map<uint64_t, uint64_t> &out) {
     out.insert(pair<uint64_t, uint64_t>(0, get_length(cont)));
   }
   uint64_t get_length(const ContDesc &in) {
     RandWrap rand(in.seqnum);
-    return (rand() % max_len);
+    // make some attrs big
+    if (in.seqnum & 3)
+      return (rand() % max_len);
+    else
+      return (rand() % big_max_len);
   }
   bufferlist gen_bl(const ContDesc &in) {
     bufferlist bl;
     for (iterator i = get_iterator(in); !i.end(); ++i) {
       bl.append(*i);
     }
-    assert(bl.length() < max_len);
+    assert(bl.length() < big_max_len);
     return bl;
   }
 };
@@ -350,6 +358,8 @@ public:
   // takes ownership of gen
   void update(ContentsGenerator *gen, const ContDesc &next);
   bool check(bufferlist &to_check);
+  bool check_sparse(const std::map<uint64_t, uint64_t>& extends,
+		    bufferlist &to_check);
   const ContDesc &most_recent();
   ContentsGenerator *most_recent_gen() {
     return layers.begin()->first.get();

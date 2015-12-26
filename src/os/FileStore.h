@@ -52,14 +52,14 @@ using namespace std;
 
 #if defined(__linux__)
 # ifndef BTRFS_SUPER_MAGIC
-static const __SWORD_TYPE BTRFS_SUPER_MAGIC(0x9123683E);
+#define BTRFS_SUPER_MAGIC 0x9123683E
 # endif
 # ifndef XFS_SUPER_MAGIC
-static const __SWORD_TYPE XFS_SUPER_MAGIC(0x58465342);
+#define XFS_SUPER_MAGIC 0x58465342
 # endif
-#ifndef ZFS_SUPER_MAGIC
-static const __SWORD_TYPE ZFS_SUPER_MAGIC(0x2fc12fc1);
-#endif
+# ifndef ZFS_SUPER_MAGIC
+#define ZFS_SUPER_MAGIC 0x2fc12fc1
+# endif
 #endif
 
 
@@ -90,13 +90,13 @@ inline ostream& operator<<(ostream& out, const FSSuperblock& sb)
 class FileStore : public JournalingObjectStore,
                   public md_config_obs_t
 {
-  static const uint32_t target_version = 3;
+  static const uint32_t target_version = 4;
 public:
   uint32_t get_target_version() {
     return target_version;
   }
 
-  int peek_journal_fsid(uuid_d *fsid);
+  static int get_block_device_fsid(const string& path, uuid_d *fsid);
 
   struct FSPerfTracker {
     PerfCounters::avg_tracker<uint64_t> os_commit_latency;
@@ -140,11 +140,18 @@ private:
   int get_index(coll_t c, Index *index);
   int init_index(coll_t c);
 
+  void _kludge_temp_object_collection(coll_t& cid, const ghobject_t& oid) {
+    // - normal temp case: cid is pg, object is temp (pool < -1)
+    // - hammer temp case: cid is pg (or already temp), object pool is -1
+    if (cid.is_pg() && (oid.hobj.pool < -1 ||
+			oid.hobj.pool == -1))
+      cid = cid.get_temp();
+  }
+  void init_temp_collections();
+
   // ObjectMap
   boost::scoped_ptr<ObjectMap> object_map;
   
-  Finisher ondisk_finisher;
-
   // helper fns
   int get_cdir(coll_t cid, char *s, int len);
   
@@ -158,7 +165,6 @@ private:
   Mutex lock;
   bool force_sync;
   Cond sync_cond;
-  uint64_t sync_epoch;
 
   Mutex sync_entry_timeo_lock;
   SafeTimer timer;
@@ -193,6 +199,7 @@ private:
   public:
     Sequencer *parent;
     Mutex apply_lock;  // for apply mutual exclusion
+    int id;
     
     /// get_max_uncompleted
     bool _get_max_uncompleted(
@@ -258,6 +265,7 @@ private:
       q.push_back(o);
     }
     Op *peek_queue() {
+      Mutex::Locker l(qlock);
       assert(apply_lock.is_locked());
       return q.front();
     }
@@ -299,7 +307,6 @@ private:
       Mutex::Locker l(qlock);
       uint64_t seq = 0;
       if (_get_max_uncompleted(&seq)) {
-	delete c;
 	return true;
       } else {
 	flush_commit_waiters.push_back(make_pair(seq, c));
@@ -307,10 +314,11 @@ private:
       }
     }
 
-    OpSequencer()
+    OpSequencer(int i)
       : qlock("FileStore::OpSequencer::qlock", false, false),
 	parent(0),
-	apply_lock("FileStore::OpSequencer::apply_lock", false, false) {}
+	apply_lock("FileStore::OpSequencer::apply_lock", false, false),
+        id(i) {}
     ~OpSequencer() {
       assert(q.empty());
     }
@@ -325,12 +333,13 @@ private:
   FDCache fdcache;
   WBThrottle wbthrottle;
 
-  Sequencer default_osr;
+  atomic_t next_osr_id;
   deque<OpSequencer*> op_queue;
-  uint64_t op_queue_len, op_queue_bytes;
-  Cond op_throttle_cond;
-  Mutex op_throttle_lock;
-  Finisher op_finisher;
+  Throttle throttle_ops, throttle_bytes;
+  const int m_ondisk_finisher_num;
+  const int m_apply_finisher_num;
+  vector<Finisher*> ondisk_finishers;
+  vector<Finisher*> apply_finishers;
 
   ThreadPool op_tp;
   struct OpWQ : public ThreadPool::WorkQueue<OpSequencer> {
@@ -358,6 +367,7 @@ private:
     void _process(OpSequencer *osr, ThreadPool::TPHandle &handle) {
       store->_do_op(osr, handle);
     }
+    using ThreadPool::WorkQueue<OpSequencer>::_process;
     void _process_finish(OpSequencer *osr) {
       store->_finish_op(osr);
     }
@@ -376,9 +386,8 @@ private:
   void op_queue_release_throttle(Op *o);
   void _journaled_ahead(OpSequencer *osr, Op *o, Context *ondisk);
   friend struct C_JournaledAhead;
-  int write_version_stamp();
 
-  int open_journal();
+  void new_journal();
 
   PerfCounters *logger;
 
@@ -409,8 +418,6 @@ public:
   int _sanity_check_fs();
   
   bool test_mount_in_use();
-  int version_stamp_is_valid(uint32_t *version);
-  int update_version_stamp();
   int read_op_seq(uint64_t *seq);
   int write_op_seq(int, uint64_t seq);
   int mount();
@@ -426,6 +433,20 @@ public:
   }
   int mkfs();
   int mkjournal();
+  bool wants_journal() {
+    return true;
+  }
+  bool allows_journal() {
+    return true;
+  }
+  bool needs_journal() {
+    return false;
+  }
+
+  int write_version_stamp();
+  int version_stamp_is_valid(uint32_t *version);
+  int update_version_stamp();
+  int upgrade();
 
   /**
    * set_allow_sharded_objects()
@@ -442,6 +463,10 @@ public:
    * return value: true if set_allow_sharded_objects() called, otherwise false
    */
   bool get_allow_sharded_objects();
+
+  bool can_sort_nibblewise() {
+    return true;    // i support legacy sort order
+  }
 
   void collect_metadata(map<string,string> *pm);
 
@@ -522,12 +547,17 @@ public:
     uint64_t offset,
     size_t len,
     bufferlist& bl,
+    uint32_t op_flags = 0,
     bool allow_eio = false);
+  int _do_fiemap(int fd, uint64_t offset, size_t len,
+                 map<uint64_t, uint64_t> *m);
+  int _do_seek_hole_data(int fd, uint64_t offset, size_t len,
+                         map<uint64_t, uint64_t> *m);
   int fiemap(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len, bufferlist& bl);
 
   int _touch(coll_t cid, const ghobject_t& oid);
-  int _write(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len, const bufferlist& bl,
-      bool replica = false);
+  int _write(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len,
+	      const bufferlist& bl, uint32_t fadvise_flags = 0);
   int _zero(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len);
   int _truncate(coll_t cid, const ghobject_t& oid, uint64_t size);
   int _clone(coll_t cid, const ghobject_t& oldoid, const ghobject_t& newoid,
@@ -537,7 +567,7 @@ public:
 		   const SequencerPosition& spos);
   int _do_clone_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff);
   int _do_sparse_copy_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff);
-  int _do_copy_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff);
+  int _do_copy_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff, bool skip_sloppycrc=false);
   int _remove(coll_t cid, const ghobject_t& oid, const SequencerPosition &spos);
 
   int _fgetattr(int fd, const char *name, bufferptr& bp);
@@ -553,6 +583,7 @@ public:
   void flush();
   void sync_and_flush();
 
+  int flush_journal();
   int dump_journal(ostream& out);
 
   void set_fsid(uuid_d u) {
@@ -562,8 +593,8 @@ public:
 
   // DEBUG read error injection, an object is removed from both on delete()
   Mutex read_error_lock;
-  set<ghobject_t> data_error_set; // read() will return -EIO
-  set<ghobject_t> mdata_error_set; // getattr(),stat() will return -EIO
+  set<ghobject_t, ghobject_t::BitwiseComparator> data_error_set; // read() will return -EIO
+  set<ghobject_t, ghobject_t::BitwiseComparator> mdata_error_set; // getattr(),stat() will return -EIO
   void inject_data_error(const ghobject_t &oid);
   void inject_mdata_error(const ghobject_t &oid);
   void debug_obj_on_delete(const ghobject_t &oid);
@@ -592,21 +623,17 @@ public:
   int _collection_setattrs(coll_t cid, map<string,bufferptr> &aset);
   int _collection_remove_recursive(const coll_t &cid,
 				   const SequencerPosition &spos);
-  int _collection_rename(const coll_t &cid, const coll_t &ncid,
-			 const SequencerPosition& spos);
 
   // collections
+  int collection_list(coll_t c, ghobject_t start, ghobject_t end,
+		      bool sort_bitwise, int max,
+		      vector<ghobject_t> *ls, ghobject_t *next);
   int list_collections(vector<coll_t>& ls);
+  int list_collections(vector<coll_t>& ls, bool include_temp);
   int collection_version_current(coll_t c, uint32_t *version);
   int collection_stat(coll_t c, struct stat *st);
   bool collection_exists(coll_t c);
   bool collection_empty(coll_t c);
-  int collection_list(coll_t c, vector<ghobject_t>& oid);
-  int collection_list_partial(coll_t c, ghobject_t start,
-			      int min, int max, snapid_t snap,
-			      vector<ghobject_t> *ls, ghobject_t *next);
-  int collection_list_range(coll_t c, ghobject_t start, ghobject_t end,
-                            snapid_t seq, vector<ghobject_t> *ls);
 
   // omap (see ObjectStore.h for documentation)
   int omap_get(coll_t c, const ghobject_t &oid, bufferlist *header,
@@ -623,7 +650,6 @@ public:
 		      set<string> *out);
   ObjectMap::ObjectMapIterator get_omap_iterator(coll_t c, const ghobject_t &oid);
 
-  int _create_collection(coll_t c);
   int _create_collection(coll_t c, const SequencerPosition &spos);
   int _destroy_collection(coll_t c);
   /**
@@ -634,7 +660,7 @@ public:
    * @param expected_num_objs - expected number of objects in this collection
    * @param spos              - sequence position
    *
-   * @Return 0 on success, an error code otherwise
+   * @return 0 on success, an error code otherwise
    */
   int _collection_hint_expected_num_objs(coll_t c, uint32_t pg_num,
       uint64_t expected_num_objs,
@@ -686,7 +712,7 @@ private:
   double m_filestore_max_sync_interval;
   double m_filestore_min_sync_interval;
   bool m_filestore_fail_eio;
-  bool m_filestore_replica_fadvise;
+  bool m_filestore_fadvise;
   int do_update;
   bool m_journal_dio, m_journal_aio, m_journal_force_aio;
   std::string m_osd_rollback_to_cluster_snap;
@@ -760,7 +786,7 @@ protected:
     return filestore->current_fn;
   }
   int _copy_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff) {
-    if (has_fiemap()) {
+    if (has_fiemap() || has_seek_data_hole()) {
       return filestore->_do_sparse_copy_range(from, to, srcoff, len, dstoff);
     } else {
       return filestore->_do_copy_range(from, to, srcoff, len, dstoff);
@@ -787,9 +813,11 @@ public:
   virtual int destroy_checkpoint(const string& name) = 0;
   virtual int syncfs() = 0;
   virtual bool has_fiemap() = 0;
+  virtual bool has_seek_data_hole() = 0;
   virtual int do_fiemap(int fd, off_t start, size_t len, struct fiemap **pfiemap) = 0;
   virtual int clone_range(int from, int to, uint64_t srcoff, uint64_t len, uint64_t dstoff) = 0;
   virtual int set_alloc_hint(int fd, uint64_t hint) = 0;
+  virtual bool has_splice() const = 0;
 
   // hooks for (sloppy) crc tracking
   virtual int _crc_update_write(int fd, loff_t off, size_t len, const bufferlist& bl) = 0;

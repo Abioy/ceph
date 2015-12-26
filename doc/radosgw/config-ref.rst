@@ -68,7 +68,7 @@ Ceph configuration file, the default value will be set automatically.
 
 ``rgw dns name``
 
-:Description: The DNS name of the served domain.
+:Description: The DNS name of the served domain. See also the ``hostnames`` setting within regions.
 :Type: String 
 :Default: None
 	
@@ -129,6 +129,18 @@ Ceph configuration file, the default value will be set automatically.
 :Description: The size of the thread pool.
 :Type: Integer 
 :Default: 100 threads.
+
+
+``rgw num rados handles``
+
+:Description: The numer of the `RADOS cluster handles`_ for Ceph Object Gateway.
+              Having a configurable number of RADOS handles is resulting in
+              significant performance boost for all types of workloads. Each RGW
+              worker thread would now get to pick a RADOS handle for its lifetime,
+              from the available bunch.
+
+:Type: Integer
+:Default: ``1``
 
 
 ``rgw num control oids``
@@ -208,7 +220,7 @@ Ceph configuration file, the default value will be set automatically.
 :Default: ``false``
 
 
-``rgw object stripe size``
+``rgw obj stripe size``
 
 :Description: The size of an object stripe for Ceph Object Gateway objects.
               See `Architecture`_ for details on striping.
@@ -219,14 +231,15 @@ Ceph configuration file, the default value will be set automatically.
 
 ``rgw extended http attrs``
 
-:Description: Add new set of attributes that could be set on an object. These 
-              extra attributes can be set through HTTP header fields when 
-              putting the objects. If set, these attributes will return as HTTP 
-              fields when doing GET/HEAD on the object.
+:Description: Add new set of attributes that could be set on an entity
+              (user, bucket or object). These extra attributes can be set
+              through HTTP header fields when putting the entity or modifying
+              it using POST method. If set, these attributes will return as
+              HTTP  fields when doing GET/HEAD on the entity.
 
 :Type: String
 :Default: None
-:Example: "content_foo, content_bar"
+:Example: "content_foo, content_bar, x-foo-bar"
 
 
 ``rgw exit timeout secs``
@@ -268,6 +281,17 @@ Ceph configuration file, the default value will be set automatically.
 
 :Type: Integer
 :Default: ``1000``
+
+
+``rgw override bucket index max shards``
+
+:Description: Represents the number of shards for the bucket index object,
+              a value of zero indicates there is no sharding. It is not
+              recommended to set a value too large (e.g. thousand) as it
+              increases the cost for bucket listing.
+
+:Type: Integer
+:Default: ``0``
 
 
 ``rgw num zone opstate shards``
@@ -315,6 +339,12 @@ Ceph configuration file, the default value will be set automatically.
 :Type: String
 :Default: ``admin``
 
+
+``rgw content length compat``
+
+:Description: Enable compatability handling of FCGI requests with both CONTENT_LENGTH AND HTTP_CONTENT_LENGTH set.
+:Type: Boolean
+:Default: ``false``
 
 Regions
 =======
@@ -373,6 +403,7 @@ The ``default`` region looks like this:
     "api_name": "",
     "is_master": "true",
     "endpoints": [],
+    "hostnames": [],
     "master_zone": "",
     "zones": [
       {"name": "default",
@@ -401,7 +432,12 @@ required settings:
 #. ``endpoints``: A list of all the endpoints in the region. For example, 
    you may use multiple domain names to refer to the same region. Remember to 
    escape the forward slashes (``\/``). You may also specify a 
-   port (``fgdn:port``) for each endpoint. Optional.
+   port (``fqdn:port``) for each endpoint. Optional.
+
+#. ``hostnames``: A list of all the hostnames in the region. For example, 
+   you may use multiple domain names to refer to the same region. Optional.
+   The ``rgw dns name`` setting will automatically be included in this list.
+   You should restart the ``radosgw`` daemon(s) after changing this setting.
 
 #. ``master_zone``: The master zone for the region. Optional. Uses the default
    zone if not specified. **note:** You can only have one master zone per 
@@ -464,6 +500,7 @@ JSON object is an example of a default region map.
             "api_name": "",
             "is_master": "true",
             "endpoints": [],
+            "hostnames": [],
             "master_zone": "",
             "zones": [
               { "name": "default",
@@ -942,3 +979,4 @@ Keystone Settings
 .. _Architecture: ../../architecture#data-striping
 .. _Pool Configuration: ../../rados/configuration/pool-pg-config-ref/
 .. _Cluster Pools: ../../rados/operations/pools
+.. _Rados cluster handles: ../../rados/api/librados-intro/#step-2-configuring-a-cluster-handle

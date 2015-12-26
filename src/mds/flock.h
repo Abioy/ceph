@@ -37,7 +37,9 @@ inline bool operator==(ceph_filelock& l, ceph_filelock& r) {
 }
 
 class ceph_lock_state_t {
+  CephContext *cct;
 public:
+  ceph_lock_state_t(CephContext *cct_) : cct(cct_) {}
   multimap<uint64_t, ceph_filelock> held_locks;    // current locks
   multimap<uint64_t, ceph_filelock> waiting_locks; // locks waiting for other locks
   // both of the above are keyed by starting offset
@@ -212,6 +214,11 @@ public:
     waiting_locks.clear();
     client_held_lock_counts.clear();
     client_waiting_lock_counts.clear();
+  }
+  bool empty() const {
+    return held_locks.empty() && waiting_locks.empty() &&
+	   client_held_lock_counts.empty() &&
+	   client_waiting_lock_counts.empty();
   }
 };
 WRITE_CLASS_ENCODER(ceph_lock_state_t)

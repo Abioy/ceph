@@ -98,24 +98,26 @@ struct config_option config_optionsp[] = {
 
 const int NUM_CONFIG_OPTIONS = sizeof(config_optionsp) / sizeof(config_option);
 
-bool ceph_resolve_file_search(const std::string& filename_list,
-			      std::string& result)
+int ceph_resolve_file_search(const std::string& filename_list,
+			     std::string& result)
 {
   list<string> ls;
   get_str_list(filename_list, ls);
 
+  int ret = -ENOENT;
   list<string>::iterator iter;
   for (iter = ls.begin(); iter != ls.end(); ++iter) {
     int fd = ::open(iter->c_str(), O_RDONLY);
-    if (fd < 0)
+    if (fd < 0) {
+      ret = -errno;
       continue;
-
+    }
     close(fd);
     result = *iter;
-    return true;
+    return 0;
   }
 
-  return false;
+  return ret;
 }
 
 md_config_t::md_config_t()
@@ -148,7 +150,7 @@ md_config_t::md_config_t()
 #undef OPTION
 #undef SUBSYS
 #undef DEFAULT_SUBSYS
-  lock("md_config_t", true)
+  lock("md_config_t", true, false)
 {
   init_subsys();
 }
@@ -484,6 +486,7 @@ int md_config_t::parse_option(std::vector<const char*>& args,
   }
 
   for (o = 0; o < NUM_CONFIG_OPTIONS; ++o) {
+    ostringstream err;
     const config_option *opt = config_optionsp + o;
     std::string as_option("--");
     as_option += opt->name;
@@ -507,8 +510,13 @@ int md_config_t::parse_option(std::vector<const char*>& args,
 	}
       }
     }
-    else if (ceph_argparse_witharg(args, i, &val,
+    else if (ceph_argparse_witharg(args, i, &val, err,
 				   as_option.c_str(), (char*)NULL)) {
+      if (!err.str().empty()) {
+	*oss << err.str();
+	ret = -EINVAL;
+	break;
+      }
       if (oss && (
 		  ((opt->type == OPT_STR) || (opt->type == OPT_ADDR) ||
 		   (opt->type == OPT_UUID)) &&
@@ -803,6 +811,22 @@ int md_config_t::_get_val(const char *key, char **buf, int len) const
   return -ENOENT;
 }
 
+void md_config_t::get_all_keys(std::vector<std::string> *keys) const {
+  const std::string negative_flag_prefix("no_");
+
+  keys->clear();
+  keys->reserve(NUM_CONFIG_OPTIONS);
+  for (size_t i = 0; i < NUM_CONFIG_OPTIONS; ++i) {
+    keys->push_back(config_optionsp[i].name);
+    if (config_optionsp[i].type == OPT_BOOL) {
+      keys->push_back(negative_flag_prefix + config_optionsp[i].name);
+    }
+  }
+  for (int i = 0; i < subsys.get_num(); ++i) {
+    keys->push_back("debug_" + subsys.get_name(i));
+  }
+}
+
 /* The order of the sections here is important.  The first section in the
  * vector is the "highest priority" section; if we find it there, we'll stop
  * looking. The lowest priority section is the one we look in only if all
@@ -877,7 +901,7 @@ int md_config_t::set_val_raw(const char *val, const config_option *opt)
   switch (opt->type) {
     case OPT_INT: {
       std::string err;
-      int f = strict_sistrtoll(val, &err);
+      int f = strict_si_cast<int>(val, &err);
       if (!err.empty())
 	return -EINVAL;
       *(int*)opt->conf_ptr(this) = f;
@@ -885,7 +909,7 @@ int md_config_t::set_val_raw(const char *val, const config_option *opt)
     }
     case OPT_LONGLONG: {
       std::string err;
-      long long f = strict_sistrtoll(val, &err);
+      long long f = strict_si_cast<long long>(val, &err);
       if (!err.empty())
 	return -EINVAL;
       *(long long*)opt->conf_ptr(this) = f;
@@ -894,12 +918,22 @@ int md_config_t::set_val_raw(const char *val, const config_option *opt)
     case OPT_STR:
       *(std::string*)opt->conf_ptr(this) = val ? val : "";
       return 0;
-    case OPT_FLOAT:
-      *(float*)opt->conf_ptr(this) = atof(val);
+    case OPT_FLOAT: {
+      std::string err;
+      float f = strict_strtof(val, &err);
+      if (!err.empty())
+	return -EINVAL;
+      *(float*)opt->conf_ptr(this) = f;
       return 0;
-    case OPT_DOUBLE:
-      *(double*)opt->conf_ptr(this) = atof(val);
+    }
+    case OPT_DOUBLE: {
+      std::string err;
+      double f = strict_strtod(val, &err);
+      if (!err.empty())
+	return -EINVAL;
+      *(double*)opt->conf_ptr(this) = f;
       return 0;
+    }
     case OPT_BOOL:
       if (strcasecmp(val, "false") == 0)
 	*(bool*)opt->conf_ptr(this) = false;
@@ -915,7 +949,7 @@ int md_config_t::set_val_raw(const char *val, const config_option *opt)
       return 0;
     case OPT_U32: {
       std::string err;
-      int f = strict_sistrtoll(val, &err);
+      int f = strict_si_cast<int>(val, &err);
       if (!err.empty())
 	return -EINVAL;
       *(uint32_t*)opt->conf_ptr(this) = f;
@@ -923,7 +957,7 @@ int md_config_t::set_val_raw(const char *val, const config_option *opt)
     }
     case OPT_U64: {
       std::string err;
-      long long f = strict_sistrtoll(val, &err);
+      uint64_t f = strict_si_cast<uint64_t>(val, &err);
       if (!err.empty())
 	return -EINVAL;
       *(uint64_t*)opt->conf_ptr(this) = f;
@@ -947,7 +981,7 @@ int md_config_t::set_val_raw(const char *val, const config_option *opt)
 }
 
 static const char *CONF_METAVARIABLES[] =
-  { "cluster", "type", "name", "host", "num", "id", "pid" };
+  { "cluster", "type", "name", "host", "num", "id", "pid", "cctid" };
 static const int NUM_CONF_METAVARIABLES =
       (sizeof(CONF_METAVARIABLES) / sizeof(CONF_METAVARIABLES[0]));
 
@@ -1059,6 +1093,8 @@ bool md_config_t::expand_meta(std::string &origval,
 	  out += name.get_id().c_str();
 	else if (var == "pid")
 	  out += stringify(getpid());
+	else if (var == "cctid")
+	  out += stringify((unsigned long long)this);
 	else
 	  assert(0); // unreachable
 	expanded = true;
@@ -1129,9 +1165,4 @@ void md_config_t::diff(
     if (strcmp(local_val, other_val))
       diff->insert(make_pair(opt->name, make_pair(local_val, other_val)));
   }
-}
-
-md_config_obs_t::
-~md_config_obs_t()
-{
 }

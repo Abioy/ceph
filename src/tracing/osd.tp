@@ -1,3 +1,5 @@
+#include "include/int_types.h"
+
 TRACEPOINT_EVENT(osd, prepare_tx_enter,
     TP_ARGS(
         // osd_reqid_t
@@ -466,12 +468,32 @@ TRACEPOINT_EVENT(osd, do_osd_op_pre_watch,
         const char*, oid,
         uint64_t, snap,
         uint64_t, cookie,
-        uint8_t, flag),
+        uint8_t, op),
     TP_FIELDS(
         ctf_string(oid, oid)
         ctf_integer(uint64_t, snap, snap)
         ctf_integer(uint64_t, cookie, cookie)
-        ctf_integer(uint8_t, flag, flag)
+        ctf_integer(uint8_t, op, op)
+    )
+)
+
+TRACEPOINT_EVENT(osd, do_osd_op_pre_cache_pin,
+    TP_ARGS(
+        const char*, oid,
+        uint64_t, snap),
+    TP_FIELDS(
+        ctf_string(oid, oid)
+        ctf_integer(uint64_t, snap, snap)
+    )
+)
+
+TRACEPOINT_EVENT(osd, do_osd_op_pre_cache_unpin,
+    TP_ARGS(
+        const char*, oid,
+        uint64_t, snap),
+    TP_FIELDS(
+        ctf_string(oid, oid)
+        ctf_integer(uint64_t, snap, snap)
     )
 )
 
@@ -638,12 +660,10 @@ TRACEPOINT_EVENT(osd, do_osd_op_pre_omap_cmp,
 TRACEPOINT_EVENT(osd, do_osd_op_pre_omapsetvals,
     TP_ARGS(
         const char*, oid,
-        uint64_t, snap,
-        const char*, keys),
+        uint64_t, snap),
     TP_FIELDS(
         ctf_string(oid, oid)
         ctf_integer(uint64_t, snap, snap)
-        ctf_string(keys, keys)
     )
 )
 
@@ -670,12 +690,10 @@ TRACEPOINT_EVENT(osd, do_osd_op_pre_omapclear,
 TRACEPOINT_EVENT(osd, do_osd_op_pre_omaprmkeys,
     TP_ARGS(
         const char*, oid,
-        uint64_t, snap,
-        const char*, keys),
+        uint64_t, snap),
     TP_FIELDS(
         ctf_string(oid, oid)
         ctf_integer(uint64_t, snap, snap)
-        ctf_string(keys, keys)
     )
 )
 

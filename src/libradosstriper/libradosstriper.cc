@@ -108,7 +108,7 @@ int libradosstriper::MultiAioCompletion::get_return_value()
 void libradosstriper::MultiAioCompletion::release()
 {
   MultiAioCompletionImpl *c = (MultiAioCompletionImpl *)pc;
-  c->release();
+  c->put();
   delete this;
 }
 
@@ -272,6 +272,10 @@ int libradosstriper::RadosStriper::stat(const std::string& soid, uint64_t *psize
 int libradosstriper::RadosStriper::remove(const std::string& soid)
 {
   return rados_striper_impl->remove(soid);
+}
+int libradosstriper::RadosStriper::remove(const std::string& soid, int flags)
+{
+  return rados_striper_impl->remove(soid, flags); 
 }
 
 int libradosstriper::RadosStriper::trunc(const std::string& soid, uint64_t size)

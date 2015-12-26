@@ -6,7 +6,7 @@
 
 You can configure Ceph OSD Daemons in the Ceph configuration file, but Ceph OSD
 Daemons can use the default values and a very minimal configuration. A minimal
-Ceph OSD Daemon configuration sets ``osd journal size`` and ``osd host``,  and
+Ceph OSD Daemon configuration sets ``osd journal size`` and ``host``,  and
 uses default values for nearly everything else.
 
 Ceph OSD Daemons are numerically identified in incremental fashion, beginning
@@ -19,7 +19,7 @@ with ``0`` using the following convention. ::
 In a configuration file, you may specify settings for all Ceph OSD Daemons in
 the cluster by adding configuration settings to the ``[osd]`` section of your
 configuration file. To add settings directly to a specific Ceph OSD Daemon
-(e.g., ``osd host``), enter  it in an OSD-specific section of your configuration
+(e.g., ``host``), enter  it in an OSD-specific section of your configuration
 file. For example:
 
 .. code-block:: ini
@@ -28,10 +28,10 @@ file. For example:
 		osd journal size = 1024
 	
 	[osd.0]
-		osd host = osd-host-a
+		host = osd-host-a
 		
 	[osd.1]
-		osd host = osd-host-b
+		host = osd-host-b
 
 
 .. index:: OSD; config settings
@@ -89,6 +89,34 @@ that Ceph uses the entire partition for the journal.
 :Type: String
 :Default: ``$libdir/rados-classes``
 
+
+.. index:: OSD; file system
+
+File System Settings
+====================
+Ceph builds and mounts file systems which are used for Ceph OSDs.
+
+``osd mkfs options {fs-type}`` 
+
+:Description: Options used when creating a new Ceph OSD of type {fs-type}.
+
+:Type: String
+:Default for xfs: ``-f -i 2048``
+:Default for other file systems: {empty string}
+
+For example::
+  ``osd mkfs options xfs = -f -d agcount=24``
+
+``osd mount options {fs-type}`` 
+
+:Description: Options used when mounting a Ceph OSD of type {fs-type}.
+
+:Type: String
+:Default for xfs: ``rw,noatime,inode64``
+:Default for other file systems: ``rw, noatime``
+
+For example::
+  ``osd mount options xfs = rw, noatime, inode64, logbufs=8``
 
 
 .. index:: OSD; journal settings
@@ -191,6 +219,23 @@ scrubbing operations.
 :Type: 32-bit Int
 :Default: ``1`` 
 
+``osd scrub begin hour``
+
+:Description: The time of day for the lower bound when a scheduled scrub can be
+              performed.
+:Type: Integer in the range of 0 to 24
+:Default: ``0``
+
+
+``osd scrub end hour``
+
+:Description: The time of day for the upper bound when a scheduled scrub can be
+              performed. Along with ``osd scrub begin hour``, they define a time
+              window, in which the scrubs can happen. But a scrub will be performed
+              no matter the time window allows or not, as long as the placement
+              group's scrub interval exceeds ``osd scrub max interval``.
+:Type: Integer in the range of 0 to 24
+:Default: ``24``
 
 ``osd scrub thread timeout`` 
 
@@ -244,6 +289,17 @@ scrubbing operations.
 :Type: Float
 :Default: Once per week.  ``60*60*24*7``
 
+
+``osd scrub interval randomize ratio``
+
+:Description: Add a random delay to ``osd scrub min interval`` when scheduling
+              the next scrub job for a placement group. The delay is a random
+              value less than ``osd scrub min interval`` \*
+              ``osd scrub interval randomized ratio``. So the default setting
+              practically randomly spreads the scrubs out in the allowed time
+              window of ``[1, 1.5]`` \* ``osd scrub min interval``.
+:Type: Float
+:Default: ``0.5``
 
 ``osd deep scrub stride``
 
@@ -320,10 +376,10 @@ recovery operations to ensure optimal performance during recovery.
 :Type: 32-bit Integer
 :Default: ``1`` 
 
-``disk thread ioprio class``
+``osd disk thread ioprio class``
 
-:Description: Warning: it will only be used if both ``disk thread
-	      ioprio class`` and ``disk thread ioprio priority`` are
+:Description: Warning: it will only be used if both ``osd disk thread
+	      ioprio class`` and ``osd disk thread ioprio priority`` are
 	      set to a non default value.  Sets the ioprio_set(2) I/O
 	      scheduling ``class`` for the disk thread. Acceptable
 	      values are ``idle``, ``be`` or ``rt``. The ``idle``
@@ -340,10 +396,10 @@ recovery operations to ensure optimal performance during recovery.
 :Type: String
 :Default: the empty string
 
-``disk thread ioprio priority``
+``osd disk thread ioprio priority``
 
-:Description: Warning: it will only be used if both ``disk thread
-	      ioprio class`` and ``disk thread ioprio priority`` are
+:Description: Warning: it will only be used if both ``osd disk thread
+	      ioprio class`` and ``osd disk thread ioprio priority`` are
 	      set to a non default value. It sets the ioprio_set(2)
 	      I/O scheduling ``priority`` of the disk thread ranging
 	      from 0 (highest) to 7 (lowest). If all OSDs on a given
@@ -399,16 +455,15 @@ priority than requests to read or write data.
 
 ``osd backfill scan min`` 
 
-:Description: The scan interval in seconds for backfill operations when cluster 
-              load is low.
+:Description: The minimum number of objects per backfill scan.
+
 :Type: 32-bit Integer
 :Default: ``64`` 
 
 
 ``osd backfill scan max`` 
 
-:Description: The maximum scan interval in seconds for backfill operations 
-              irrespective of cluster load.
+:Description: The maximum number of objects per backfill scan.
 
 :Type: 32-bit Integer
 :Default: ``512`` 
@@ -448,7 +503,7 @@ Ceph performs well as the OSD map grows larger.
 
 ``osd map cache size`` 
 
-:Description: The size of the OSD map cache in megabytes.
+:Description: The number of OSD maps to keep cached.
 :Type: 32-bit Integer
 :Default: ``500``
 

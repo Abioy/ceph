@@ -19,6 +19,11 @@
 using std::stringstream;
 
 
+const mds_rank_t MDSMap::MDS_NO_STANDBY_PREF(-1);
+const mds_rank_t MDSMap::MDS_STANDBY_ANY(-2);
+const mds_rank_t MDSMap::MDS_STANDBY_NAME(-3);
+const mds_rank_t MDSMap::MDS_MATCHED_ACTIVE(-4);
+
 // features
 CompatSet get_mdsmap_compat_set_all() {
   CompatSet::FeatureSet feature_compat;
@@ -58,7 +63,7 @@ CompatSet get_mdsmap_compat_set_base() {
   feature_incompat_base.insert(MDS_FEATURE_INCOMPAT_BASE);
   CompatSet::FeatureSet feature_ro_compat_base;
 
-  return CompatSet(feature_compat_base, feature_incompat_base, feature_ro_compat_base);
+  return CompatSet(feature_compat_base, feature_ro_compat_base, feature_incompat_base);
 }
 
 void MDSMap::mds_info_t::dump(Formatter *f) const
@@ -76,7 +81,7 @@ void MDSMap::mds_info_t::dump(Formatter *f) const
   f->dump_int("standby_for_rank", standby_for_rank);
   f->dump_string("standby_for_name", standby_for_name);
   f->open_array_section("export_targets");
-  for (set<int32_t>::iterator p = export_targets.begin();
+  for (set<mds_rank_t>::iterator p = export_targets.begin();
        p != export_targets.end(); ++p) {
     f->dump_int("mds", *p);
   }
@@ -112,26 +117,30 @@ void MDSMap::dump(Formatter *f) const
   f->close_section();
   f->dump_int("max_mds", max_mds);
   f->open_array_section("in");
-  for (set<int32_t>::const_iterator p = in.begin(); p != in.end(); ++p)
+  for (set<mds_rank_t>::const_iterator p = in.begin(); p != in.end(); ++p)
     f->dump_int("mds", *p);
   f->close_section();
   f->open_object_section("up");
-  for (map<int32_t,uint64_t>::const_iterator p = up.begin(); p != up.end(); ++p) {
-    char s[10];
-    sprintf(s, "mds_%d", p->first);
+  for (map<mds_rank_t,mds_gid_t>::const_iterator p = up.begin(); p != up.end(); ++p) {
+    char s[14];
+    sprintf(s, "mds_%d", int(p->first));
     f->dump_int(s, p->second);
   }
   f->close_section();
   f->open_array_section("failed");
-  for (set<int32_t>::const_iterator p = failed.begin(); p != failed.end(); ++p)
+  for (set<mds_rank_t>::const_iterator p = failed.begin(); p != failed.end(); ++p)
+    f->dump_int("mds", *p);
+  f->close_section();
+  f->open_array_section("damaged");
+  for (set<mds_rank_t>::const_iterator p = damaged.begin(); p != damaged.end(); ++p)
     f->dump_int("mds", *p);
   f->close_section();
   f->open_array_section("stopped");
-  for (set<int32_t>::const_iterator p = stopped.begin(); p != stopped.end(); ++p)
+  for (set<mds_rank_t>::const_iterator p = stopped.begin(); p != stopped.end(); ++p)
     f->dump_int("mds", *p);
   f->close_section();
   f->open_object_section("info");
-  for (map<uint64_t,mds_info_t>::const_iterator p = mds_info.begin(); p != mds_info.end(); ++p) {
+  for (map<mds_gid_t,mds_info_t>::const_iterator p = mds_info.begin(); p != mds_info.end(); ++p) {
     char s[25]; // 'gid_' + len(str(ULLONG_MAX)) + '\0'
     sprintf(s, "gid_%llu", (long long unsigned)p->first);
     f->open_object_section(s);
@@ -182,18 +191,19 @@ void MDSMap::print(ostream& out)
   out << "in\t" << in << "\n"
       << "up\t" << up << "\n"
       << "failed\t" << failed << "\n"
+      << "damaged\t" << damaged << "\n"
       << "stopped\t" << stopped << "\n";
   out << "data_pools\t" << data_pools << "\n";
   out << "metadata_pool\t" << metadata_pool << "\n";
   out << "inline_data\t" << (inline_data_enabled ? "enabled" : "disabled") << "\n";
 
-  multimap< pair<unsigned,unsigned>, uint64_t > foo;
-  for (map<uint64_t,mds_info_t>::iterator p = mds_info.begin();
+  multimap< pair<mds_rank_t, unsigned>, mds_gid_t > foo;
+  for (map<mds_gid_t,mds_info_t>::iterator p = mds_info.begin();
        p != mds_info.end();
        ++p)
-    foo.insert(pair<pair<unsigned,unsigned>,uint64_t>(pair<unsigned,unsigned>(p->second.rank, p->second.inc-1), p->first));
+    foo.insert(std::make_pair(std::make_pair(p->second.rank, p->second.inc-1), p->first));
 
-  for (multimap< pair<unsigned,unsigned>, uint64_t >::iterator p = foo.begin();
+  for (multimap< pair<mds_rank_t, unsigned>, mds_gid_t >::iterator p = foo.begin();
        p != foo.end();
        ++p) {
     mds_info_t& info = mds_info[p->second];
@@ -226,7 +236,7 @@ void MDSMap::print(ostream& out)
 
 void MDSMap::print_summary(Formatter *f, ostream *out)
 {
-  map<int,string> by_rank;
+  map<mds_rank_t,string> by_rank;
   map<string,int> by_state;
 
   if (f) {
@@ -240,7 +250,7 @@ void MDSMap::print_summary(Formatter *f, ostream *out)
 
   if (f)
     f->open_array_section("by_rank");
-  for (map<uint64_t,mds_info_t>::iterator p = mds_info.begin();
+  for (map<mds_gid_t,mds_info_t>::iterator p = mds_info.begin();
        p != mds_info.end();
        ++p) {
     string s = ceph_mds_state_name(p->second.state);
@@ -283,6 +293,14 @@ void MDSMap::print_summary(Formatter *f, ostream *out)
       *out << ", " << failed.size() << " failed";
     }
   }
+
+  if (!damaged.empty()) {
+    if (f) {
+      f->dump_unsigned("damaged", damaged.size());
+    } else {
+      *out << ", " << damaged.size() << " damaged";
+    }
+  }
   //if (stopped.size())
   //out << ", " << stopped.size() << " stopped";
 }
@@ -299,9 +317,26 @@ void MDSMap::get_health(list<pair<health_status_t,string> >& summary,
 	<< " failed";
     summary.push_back(make_pair(HEALTH_ERR, oss.str()));
     if (detail) {
-      for (set<int>::const_iterator p = failed.begin(); p != failed.end(); ++p) {
+      for (set<mds_rank_t>::const_iterator p = failed.begin(); p != failed.end(); ++p) {
 	std::ostringstream oss;
 	oss << "mds." << *p << " has failed";
+	detail->push_back(make_pair(HEALTH_ERR, oss.str()));
+      }
+    }
+  }
+
+  if (!damaged.empty()) {
+    std::ostringstream oss;
+    oss << "mds rank"
+	<< ((damaged.size() > 1) ? "s ":" ")
+	<< damaged
+	<< ((damaged.size() > 1) ? " are":" is")
+	<< " damaged";
+    summary.push_back(make_pair(HEALTH_ERR, oss.str()));
+    if (detail) {
+      for (set<mds_rank_t>::const_iterator p = damaged.begin(); p != damaged.end(); ++p) {
+	std::ostringstream oss;
+	oss << "mds." << *p << " is damaged";
 	detail->push_back(make_pair(HEALTH_ERR, oss.str()));
       }
     }
@@ -311,11 +346,11 @@ void MDSMap::get_health(list<pair<health_status_t,string> >& summary,
     summary.push_back(make_pair(HEALTH_WARN, "mds cluster is degraded"));
     if (detail) {
       detail->push_back(make_pair(HEALTH_WARN, "mds cluster is degraded"));
-      for (unsigned i=0; i< get_max_mds(); i++) {
+      for (mds_rank_t i = mds_rank_t(0); i< get_max_mds(); i++) {
 	if (!is_up(i))
 	  continue;
-	uint64_t gid = up.find(i)->second;
-	map<uint64_t,mds_info_t>::const_iterator info = mds_info.find(gid);
+	mds_gid_t gid = up.find(i)->second;
+	map<mds_gid_t,mds_info_t>::const_iterator info = mds_info.find(gid);
 	stringstream ss;
 	if (is_resolve(i))
 	  ss << "mds." << info->second.name << " at " << info->second.addr << " rank " << i << " is resolving";
@@ -331,12 +366,15 @@ void MDSMap::get_health(list<pair<health_status_t,string> >& summary,
     }
   }
 
-  map<int32_t,uint64_t>::const_iterator u = up.begin();
-  map<int32_t,uint64_t>::const_iterator u_end = up.end();
-  map<uint64_t,mds_info_t>::const_iterator m_end = mds_info.end();
+  map<mds_rank_t, mds_gid_t>::const_iterator u = up.begin();
+  map<mds_rank_t, mds_gid_t>::const_iterator u_end = up.end();
+  map<mds_gid_t, mds_info_t>::const_iterator m_end = mds_info.end();
   set<string> laggy;
   for (; u != u_end; ++u) {
-    map<uint64_t,mds_info_t>::const_iterator m = mds_info.find(u->second);
+    map<mds_gid_t, mds_info_t>::const_iterator m = mds_info.find(u->second);
+    if (m == m_end) {
+      std::cerr << "Up rank " << u->first << " GID " << u->second << " not found!" << std::endl;
+    }
     assert(m != m_end);
     const mds_info_t &mds_info(m->second);
     if (mds_info.laggy()) {
@@ -427,7 +465,7 @@ void MDSMap::encode(bufferlist& bl, uint64_t features) const
     ::encode(max_mds, bl);
     __u32 n = mds_info.size();
     ::encode(n, bl);
-    for (map<uint64_t, mds_info_t>::const_iterator i = mds_info.begin();
+    for (map<mds_gid_t, mds_info_t>::const_iterator i = mds_info.begin();
 	i != mds_info.end(); ++i) {
       ::encode(i->first, bl);
       ::encode(i->second, bl, features);
@@ -455,7 +493,7 @@ void MDSMap::encode(bufferlist& bl, uint64_t features) const
     ::encode(max_mds, bl);
     __u32 n = mds_info.size();
     ::encode(n, bl);
-    for (map<uint64_t, mds_info_t>::const_iterator i = mds_info.begin();
+    for (map<mds_gid_t, mds_info_t>::const_iterator i = mds_info.begin();
 	i != mds_info.end(); ++i) {
       ::encode(i->first, bl);
       ::encode(i->second, bl, features);
@@ -494,7 +532,7 @@ void MDSMap::encode(bufferlist& bl, uint64_t features) const
   ::encode(cas_pool, bl);
 
   // kclient ignores everything from here
-  __u16 ev = 8;
+  __u16 ev = 9;
   ::encode(ev, bl);
   ::encode(compat, bl);
   ::encode(metadata_pool, bl);
@@ -512,6 +550,7 @@ void MDSMap::encode(bufferlist& bl, uint64_t features) const
   ::encode(inline_data_enabled, bl);
   ::encode(enabled, bl);
   ::encode(fs_name, bl);
+  ::encode(damaged, bl);
   ENCODE_FINISH(bl);
 }
 
@@ -593,5 +632,61 @@ void MDSMap::decode(bufferlist::iterator& p)
       enabled = false;
     }
   }
+
+  if (ev >= 9) {
+    ::decode(damaged, p);
+  }
   DECODE_FINISH(p);
+}
+
+MDSMap::availability_t MDSMap::is_cluster_available() const
+{
+  if (epoch == 0) {
+    // This is ambiguous between "mds map was never initialized on mons" and
+    // "we never got an mdsmap from the mons".  Treat it like the latter.
+    return TRANSIENT_UNAVAILABLE;
+  }
+
+
+  // If a rank is marked damage (unavailable until operator intervenes)
+  if (damaged.size()) {
+    return STUCK_UNAVAILABLE;
+  }
+
+  // If no ranks are created (filesystem not initialized)
+  if (in.empty()) {
+    return STUCK_UNAVAILABLE;
+  }
+
+  for (const auto rank : in) {
+    std::string name;
+    if (up.count(rank) != 0) {
+      name = mds_info.at(up.at(rank)).name;
+    }
+    const mds_gid_t replacement = find_replacement_for(rank, name, false);
+    const bool standby_avail = (replacement != MDS_GID_NONE);
+
+    // If the rank is unfilled, and there are no standbys, we're unavailable
+    if (up.count(rank) == 0 && !standby_avail) {
+      return STUCK_UNAVAILABLE;
+    } else if (up.count(rank) && mds_info.at(up.at(rank)).laggy() && !standby_avail) {
+      // If the daemon is laggy and there are no standbys, we're unavailable.
+      // It would be nice to give it some grace here, but to do so callers
+      // would have to poll this time-wise, vs. just waiting for updates
+      // to mdsmap, so it's not worth the complexity.
+      return STUCK_UNAVAILABLE;
+    }
+  }
+
+  if (get_num_mds(CEPH_MDS_STATE_ACTIVE) > 0) {
+    // Nobody looks stuck, so indicate to client they should go ahead
+    // and try mounting if anybody is active.  This may include e.g.
+    // one MDS failing over and another active: the client should
+    // proceed to start talking to the active one and let the
+    // transiently-unavailable guy catch up later.
+    return AVAILABLE;
+  } else {
+    // Nothing indicating we were stuck, but nobody active (yet)
+    return TRANSIENT_UNAVAILABLE;
+  }
 }

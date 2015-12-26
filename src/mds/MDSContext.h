@@ -18,7 +18,7 @@
 
 #include "include/Context.h"
 
-class MDS;
+class MDSRank;
 
 
 /**
@@ -31,7 +31,7 @@ class MDS;
 class MDSContext : public Context
 {
 protected:
-  virtual MDS *get_mds() = 0;
+  virtual MDSRank *get_mds() = 0;
 };
 
 
@@ -51,15 +51,29 @@ public:
 class MDSInternalContext : public MDSInternalContextBase
 {
 protected:
-  MDS *mds;
-  virtual MDS* get_mds();
+  MDSRank *mds;
+  virtual MDSRank* get_mds();
 
 public:
-  MDSInternalContext(MDS *mds_) : mds(mds_) {
+  MDSInternalContext(MDSRank *mds_) : mds(mds_) {
     assert(mds != NULL);
   }
 };
 
+/**
+ * Wrap a regular Context up as an Internal context. Useful
+ * if you're trying to work with one of our more generic frameworks.
+ */
+class MDSInternalContextWrapper : public MDSInternalContextBase
+{
+protected:
+  MDSRank *mds;
+  Context *fin;
+  MDSRank *get_mds();
+public:
+  MDSInternalContextWrapper(MDSRank *m, Context *c) : mds(m), fin(c) {}
+  void finish(int r);
+};
 
 class MDSIOContextBase : public MDSContext
 {
@@ -67,28 +81,42 @@ class MDSIOContextBase : public MDSContext
 };
 
 /**
- * Completion for an I/O operation, takes big MDS lock
+ * Completion for an I/O operation, takes big MDSRank lock
  * before executing finish function.
  */
 class MDSIOContext : public MDSIOContextBase
 {
 protected:
-  MDS *mds;
-  virtual MDS* get_mds();
+  MDSRank *mds;
+  virtual MDSRank* get_mds();
 
 public:
-  MDSIOContext(MDS *mds_) : mds(mds_) {
+  MDSIOContext(MDSRank *mds_) : mds(mds_) {
     assert(mds != NULL);
   }
 };
 
+/**
+ * Wrap a regular Context up as an IO Context. Useful
+ * if you're trying to work with one of our more generic frameworks.
+ */
+class MDSIOContextWrapper : public MDSIOContextBase
+{
+protected:
+  MDSRank *mds;
+  Context *fin;
+  MDSRank *get_mds();
+public:
+  MDSIOContextWrapper(MDSRank *m, Context *c) : mds(m), fin(c) {}
+  void finish(int r);
+};
 
 /**
  * No-op for callers expecting MDSInternalContextBase
  */
 class C_MDSInternalNoop : public MDSInternalContextBase
 {
-  virtual MDS* get_mds() {assert(0);}
+  virtual MDSRank* get_mds() {assert(0);}
 public:
   void finish(int r) {}
   void complete(int r) {}
@@ -104,7 +132,7 @@ class C_IO_Wrapper : public MDSIOContext
 private:
   MDSInternalContextBase *wrapped;
 public:
-  C_IO_Wrapper(MDS *mds_, MDSInternalContextBase *wrapped_) : MDSIOContext(mds_), wrapped(wrapped_) {
+  C_IO_Wrapper(MDSRank *mds_, MDSInternalContextBase *wrapped_) : MDSIOContext(mds_), wrapped(wrapped_) {
     assert(wrapped != NULL);
   }
   virtual void finish(int r) {
@@ -119,7 +147,7 @@ public:
 class MDSInternalContextGather : public MDSInternalContextBase
 {
 protected:
-  MDS *get_mds();
+  MDSRank *get_mds();
 };
 
 
@@ -128,12 +156,10 @@ class MDSGather : public C_GatherBase<MDSInternalContextBase, MDSInternalContext
 public:
   MDSGather(CephContext *cct, MDSInternalContextBase *onfinish) : C_GatherBase<MDSInternalContextBase, MDSInternalContextGather>(cct, onfinish) {}
 protected:
-  virtual MDS *get_mds() {return NULL;}
+  virtual MDSRank *get_mds() {return NULL;}
 };
 
 
 typedef C_GatherBuilderBase<MDSInternalContextBase, MDSGather> MDSGatherBuilder;
 
-
 #endif  // MDS_CONTEXT_H
-

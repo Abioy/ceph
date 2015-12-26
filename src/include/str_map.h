@@ -83,8 +83,8 @@ extern int get_json_str_map(
  * Always returns 0, as there is no condition for failure.
  *
  * @param [in] str plain text key/value pairs
+ * @param [in] delims field delimiters to be used for parsing str
  * @param [out] str_map key/value pairs parsed from str
- * @param [in] delim field delimiters to be used for parsing str
  * @return **0**
  */
 extern int get_str_map(
@@ -133,5 +133,18 @@ extern std::string get_str_map_key(
     const std::map<std::string,std::string> &str_map,
     const std::string &key,
     const std::string *fallback_key = NULL);
+
+
+// This function's only purpose is to check whether a given map has only
+// ONE key with an empty value (which would mean that 'get_str_map()' read
+// a map in the form of 'VALUE', without any KEY/VALUE pairs) and, in such
+// event, to assign said 'VALUE' to a given 'def_key', such that we end up
+// with a map of the form "m = { 'def_key' : 'VALUE' }" instead of the
+// original "m = { 'VALUE' : '' }".
+int get_conf_str_map_helper(
+    const std::string &str,
+    std::ostringstream &oss,
+    std::map<std::string,std::string> *m,
+    const std::string &def_key);
 
 #endif

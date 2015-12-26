@@ -269,6 +269,7 @@ int	RGWSwift::get_keystone_admin_token(std::string& token)
     std::stringstream ss;
     jf.flush(ss);
     token_req.set_post_data(ss.str());
+    token_req.set_send_length(ss.str().length());
     int ret = token_req.process("POST", token_url.c_str());
     if (ret < 0)
       return ret;
@@ -296,6 +297,7 @@ int RGWSwift::check_revoked()
     return -EINVAL;
   url.append("v2.0/tokens/revoked");
   req.append_header("X-Auth-Token", token);
+  req.set_send_length(0);
   int ret = req.process(url.c_str());
   if (ret < 0)
     return ret;
@@ -508,6 +510,8 @@ int RGWSwift::validate_keystone_token(RGWRados *store, const string& token, stru
 
     validate.append_header("X-Auth-Token", admin_token);
 
+    validate.set_send_length(0);
+
     int ret = validate.process(url.c_str());
     if (ret < 0)
       return ret;
@@ -521,6 +525,13 @@ int RGWSwift::validate_keystone_token(RGWRados *store, const string& token, stru
   if (ret < 0)
     return ret;
 
+  if (t.expired()) {
+    ldout(cct, 0) << "got expired token: " << t.token.tenant.name << ":" << t.user.name << " expired: " << t.token.expires << dendl;
+    return -EPERM;
+  }
+
+  keystone_token_cache->add(token_id, t);
+
   ret = update_user_info(store, info, rgw_user);
   if (ret < 0)
     return ret;
@@ -531,10 +542,10 @@ int RGWSwift::validate_keystone_token(RGWRados *store, const string& token, stru
 int authenticate_temp_url(RGWRados *store, req_state *s)
 {
   /* temp url requires bucket and object specified in the requets */
-  if (s->bucket_name_str.empty())
+  if (s->bucket_name.empty())
     return -EPERM;
 
-  if (s->object_str.empty())
+  if (s->object.empty())
     return -EPERM;
 
   string temp_url_sig = s->info.args.get("temp_url_sig");
@@ -548,7 +559,9 @@ int authenticate_temp_url(RGWRados *store, req_state *s)
   /* need to get user info of bucket owner */
   RGWBucketInfo bucket_info;
 
-  int ret = store->get_bucket_info(NULL, s->bucket_name_str, bucket_info, NULL);
+  int ret = store->get_bucket_info(*static_cast<RGWObjectCtx *>(s->obj_ctx),
+                                   s->bucket_tenant, s->bucket_name,
+                                   bucket_info, NULL);
   if (ret < 0)
     return -EPERM;
 
@@ -612,13 +625,41 @@ int authenticate_temp_url(RGWRados *store, req_state *s)
 
 bool RGWSwift::verify_swift_token(RGWRados *store, req_state *s)
 {
+  if (!do_verify_swift_token(store, s)) {
+    return false;
+  }
+
+  if (!s->swift_user.empty()) {
+    string subuser;
+    ssize_t pos = s->swift_user.find(':');
+    if (pos < 0) {
+      subuser = s->swift_user;
+    } else {
+      subuser = s->swift_user.substr(pos + 1);
+    }
+    s->perm_mask = 0;
+    map<string, RGWSubUser>::iterator iter = s->user.subusers.find(subuser);
+    if (iter != s->user.subusers.end()) {
+      RGWSubUser& subuser_ = iter->second;
+      s->perm_mask = subuser_.perm_mask;
+    }
+  } else {
+    s->perm_mask = RGW_PERM_FULL_CONTROL;
+  }
+
+  return true;
+
+}
+
+bool RGWSwift::do_verify_swift_token(RGWRados *store, req_state *s)
+{
   if (!s->os_auth_token) {
     int ret = authenticate_temp_url(store, s);
     return (ret >= 0);
   }
 
   if (strncmp(s->os_auth_token, "AUTH_rgwtk", 10) == 0) {
-    int ret = rgw_swift_verify_signed_token(s->cct, store, s->os_auth_token, s->user);
+    int ret = rgw_swift_verify_signed_token(s->cct, store, s->os_auth_token, s->user, &s->swift_user);
     if (ret < 0)
       return false;
 
@@ -645,7 +686,7 @@ bool RGWSwift::verify_swift_token(RGWRados *store, req_state *s)
     return false;
   }
 
-  s->swift_user = info.user;
+  s->swift_user = info.user.to_str();
   s->swift_groups = info.auth_groups;
 
   string swift_user = s->swift_user;

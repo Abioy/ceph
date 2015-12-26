@@ -13,7 +13,7 @@
  */
 
 
-#include "MDS.h"
+#include "MDSRank.h"
 #include "MDCache.h"
 #include "Locker.h"
 #include "CInode.h"
@@ -25,26 +25,15 @@
 #include "MDLog.h"
 #include "MDSMap.h"
 
-#include "include/filepath.h"
-
 #include "events/EUpdate.h"
 #include "events/EOpen.h"
 
 #include "msg/Messenger.h"
-
-#include "messages/MGenericMessage.h"
-#include "messages/MDiscover.h"
-#include "messages/MDiscoverReply.h"
-
-#include "messages/MDirUpdate.h"
+#include "osdc/Objecter.h"
 
 #include "messages/MInodeFileCaps.h"
-
 #include "messages/MLock.h"
 #include "messages/MClientLease.h"
-#include "messages/MDentryUnlink.h"
-
-#include "messages/MClientRequest.h"
 #include "messages/MClientReply.h"
 #include "messages/MClientCaps.h"
 #include "messages/MClientCapRelease.h"
@@ -61,7 +50,7 @@
 #undef DOUT_COND
 #define DOUT_COND(cct, l) l<=cct->_conf->debug_mds || l <= cct->_conf->debug_mds_locker
 #define dout_prefix _prefix(_dout, mds)
-static ostream& _prefix(std::ostream *_dout, MDS *mds) {
+static ostream& _prefix(std::ostream *_dout, MDSRank *mds) {
   return *_dout << "mds." << mds->get_nodeid() << ".locker ";
 }
 
@@ -69,7 +58,7 @@ static ostream& _prefix(std::ostream *_dout, MDS *mds) {
 class LockerContext : public MDSInternalContextBase {
   protected:
   Locker *locker;
-  MDS *get_mds()
+  MDSRank *get_mds()
   {
     return locker->mds;
   }
@@ -99,6 +88,7 @@ void Locker::dispatch(Message *m)
     // client sync
   case CEPH_MSG_CLIENT_CAPS:
     handle_client_caps(static_cast<MClientCaps*>(m));
+
     break;
   case CEPH_MSG_CLIENT_CAPRELEASE:
     handle_client_cap_release(static_cast<MClientCapRelease*>(m));
@@ -127,8 +117,8 @@ void Locker::tick()
 
 void Locker::send_lock_message(SimpleLock *lock, int msg)
 {
-  for (map<int,unsigned>::iterator it = lock->get_parent()->replicas_begin();
-       it != lock->get_parent()->replicas_end(); 
+  for (compact_map<mds_rank_t,unsigned>::iterator it = lock->get_parent()->replicas_begin();
+       it != lock->get_parent()->replicas_end();
        ++it) {
     if (mds->mdsmap->get_state(it->first) < MDSMap::STATE_REJOIN) 
       continue;
@@ -139,8 +129,8 @@ void Locker::send_lock_message(SimpleLock *lock, int msg)
 
 void Locker::send_lock_message(SimpleLock *lock, int msg, const bufferlist &data)
 {
-  for (map<int,unsigned>::iterator it = lock->get_parent()->replicas_begin();
-       it != lock->get_parent()->replicas_end(); 
+  for (compact_map<mds_rank_t,unsigned>::iterator it = lock->get_parent()->replicas_begin();
+       it != lock->get_parent()->replicas_end();
        ++it) {
     if (mds->mdsmap->get_state(it->first) < MDSMap::STATE_REJOIN) 
       continue;
@@ -208,7 +198,7 @@ bool Locker::acquire_locks(MDRequestRef& mdr,
 			   set<SimpleLock*> &rdlocks,
 			   set<SimpleLock*> &wrlocks,
 			   set<SimpleLock*> &xlocks,
-			   map<SimpleLock*,int> *remote_wrlocks,
+			   map<SimpleLock*,mds_rank_t> *remote_wrlocks,
 			   CInode *auth_pin_freeze,
 			   bool auth_pin_nonblock)
 {
@@ -286,7 +276,7 @@ bool Locker::acquire_locks(MDRequestRef& mdr,
 
   // remote_wrlocks
   if (remote_wrlocks) {
-    for (map<SimpleLock*,int>::iterator p = remote_wrlocks->begin(); p != remote_wrlocks->end(); ++p) {
+    for (map<SimpleLock*,mds_rank_t>::iterator p = remote_wrlocks->begin(); p != remote_wrlocks->end(); ++p) {
       MDSCacheObject *object = p->first->get_parent();
       dout(20) << " must remote_wrlock on mds." << p->second << " "
 	       << *p->first << " " << *object << dendl;
@@ -314,7 +304,7 @@ bool Locker::acquire_locks(MDRequestRef& mdr,
 
  
   // AUTH PINS
-  map<int, set<MDSCacheObject*> > mustpin_remote;  // mds -> (object set)
+  map<mds_rank_t, set<MDSCacheObject*> > mustpin_remote;  // mds -> (object set)
   
   // can i auth pin them all now?
   marker.message = "failed to authpin local pins";
@@ -372,17 +362,17 @@ bool Locker::acquire_locks(MDRequestRef& mdr,
   // request remote auth_pins
   if (!mustpin_remote.empty()) {
     marker.message = "requesting remote authpins";
-    for (map<MDSCacheObject*,int>::iterator p = mdr->remote_auth_pins.begin();
+    for (map<MDSCacheObject*,mds_rank_t>::iterator p = mdr->remote_auth_pins.begin();
 	 p != mdr->remote_auth_pins.end();
 	 ++p) {
       if (mustpin.count(p->first)) {
 	assert(p->second == p->first->authority().first);
-	map<int, set<MDSCacheObject*> >::iterator q = mustpin_remote.find(p->second);
+	map<mds_rank_t, set<MDSCacheObject*> >::iterator q = mustpin_remote.find(p->second);
 	if (q != mustpin_remote.end())
 	  q->second.insert(p->first);
       }
     }
-    for (map<int, set<MDSCacheObject*> >::iterator p = mustpin_remote.begin();
+    for (map<mds_rank_t, set<MDSCacheObject*> >::iterator p = mustpin_remote.begin();
 	 p != mustpin_remote.end();
 	 ++p) {
       dout(10) << "requesting remote auth_pins from mds." << p->first << dendl;
@@ -598,7 +588,7 @@ void Locker::_drop_rdlocks(MutationImpl *mut, set<CInode*> *pneed_issue)
 
 void Locker::_drop_non_rdlocks(MutationImpl *mut, set<CInode*> *pneed_issue)
 {
-  set<int> slaves;
+  set<mds_rank_t> slaves;
 
   while (!mut->xlocks.empty()) {
     SimpleLock *lock = *mut->xlocks.begin();
@@ -618,7 +608,7 @@ void Locker::_drop_non_rdlocks(MutationImpl *mut, set<CInode*> *pneed_issue)
   }
 
   while (!mut->remote_wrlocks.empty()) {
-    map<SimpleLock*,int>::iterator p = mut->remote_wrlocks.begin();
+    map<SimpleLock*,mds_rank_t>::iterator p = mut->remote_wrlocks.begin();
     slaves.insert(p->second);
     if (mut->wrlocks.count(p->first) == 0)
       mut->locks.erase(p->first);
@@ -633,7 +623,7 @@ void Locker::_drop_non_rdlocks(MutationImpl *mut, set<CInode*> *pneed_issue)
       pneed_issue->insert(static_cast<CInode*>(p));
   }
 
-  for (set<int>::iterator p = slaves.begin(); p != slaves.end(); ++p) {
+  for (set<mds_rank_t>::iterator p = slaves.begin(); p != slaves.end(); ++p) {
     if (mds->mdsmap->get_state(*p) >= MDSMap::STATE_REJOIN) {
       dout(10) << "_drop_non_rdlocks dropping remote locks on mds." << *p << dendl;
       MMDSSlaveRequest *slavereq = new MMDSSlaveRequest(mut->reqid, mut->attempt,
@@ -774,7 +764,7 @@ void Locker::eval_gather(SimpleLock *lock, bool first, bool *pneed_issue, list<M
 
     if (!lock->get_parent()->is_auth()) {
       // replica: tell auth
-      int auth = lock->get_parent()->authority().first;
+      mds_rank_t auth = lock->get_parent()->authority().first;
 
       if (lock->get_parent()->is_rejoining() &&
 	  mds->mdsmap->get_state(auth) == MDSMap::STATE_REJOIN) {
@@ -1171,7 +1161,7 @@ bool Locker::_rdlock_kick(SimpleLock *lock, bool as_anon)
 	CInode *in = static_cast<CInode*>(lock->get_parent());
 	if (lock->get_state() == LOCK_EXCL &&
 	    in->get_target_loner() >= 0 &&
-	    !as_anon)   // as_anon => caller wants SYNC, not XSYN
+	    !in->is_dir() && !as_anon)   // as_anon => caller wants SYNC, not XSYN
 	  file_xsyn(lock);
 	else
 	  simple_sync(lock);
@@ -1180,7 +1170,7 @@ bool Locker::_rdlock_kick(SimpleLock *lock, bool as_anon)
       return true;
     } else {
       // request rdlock state change from auth
-      int auth = lock->get_parent()->authority().first;
+      mds_rank_t auth = lock->get_parent()->authority().first;
       if (mds->mdsmap->is_clientreplay_or_active_or_stopping(auth)) {
 	dout(10) << "requesting rdlock from auth on "
 		 << *lock << " on " << *lock->get_parent() << dendl;
@@ -1251,9 +1241,6 @@ bool Locker::rdlock_start(SimpleLock *lock, MDRequestRef& mut, bool as_anon)
       return true;
     }
 
-    if (!_rdlock_kick(lock, as_anon))
-      break;
-
     // hmm, wait a second.
     if (in && !in->is_head() && in->is_auth() &&
 	lock->get_state() == LOCK_SNAP_SYNC) {
@@ -1268,6 +1255,9 @@ bool Locker::rdlock_start(SimpleLock *lock, MDRequestRef& mut, bool as_anon)
 	// oh, check our lock again then
       }
     }
+
+    if (!_rdlock_kick(lock, as_anon))
+      break;
   }
 
   // wait!
@@ -1408,7 +1398,7 @@ bool Locker::wrlock_start(SimpleLock *lock, MDRequestRef& mut, bool nowait)
     } else {
       // replica.
       // auth should be auth_pinned (see acquire_locks wrlock weird mustpin case).
-      int auth = lock->get_parent()->authority().first;
+      mds_rank_t auth = lock->get_parent()->authority().first;
       if (mds->mdsmap->is_clientreplay_or_active_or_stopping(auth)) {
 	dout(10) << "requesting scatter from auth on "
 		 << *lock << " on " << *lock->get_parent() << dendl;
@@ -1452,7 +1442,7 @@ void Locker::wrlock_finish(SimpleLock *lock, MutationImpl *mut, bool *pneed_issu
 
 // remote wrlock
 
-void Locker::remote_wrlock_start(SimpleLock *lock, int target, MDRequestRef& mut)
+void Locker::remote_wrlock_start(SimpleLock *lock, mds_rank_t target, MDRequestRef& mut)
 {
   dout(7) << "remote_wrlock_start mds." << target << " on " << *lock << " on " << *lock->get_parent() << dendl;
 
@@ -1477,7 +1467,7 @@ void Locker::remote_wrlock_start(SimpleLock *lock, int target, MDRequestRef& mut
   mut->more()->waiting_on_slave.insert(target);
 }
 
-void Locker::remote_wrlock_finish(SimpleLock *lock, int target,
+void Locker::remote_wrlock_finish(SimpleLock *lock, mds_rank_t target,
                                   MutationImpl *mut)
 {
   // drop ref
@@ -1529,8 +1519,9 @@ bool Locker::xlock_start(SimpleLock *lock, MDRequestRef& mut)
 	}
       }
 
-      if (!lock->is_stable() && !(lock->get_state() == LOCK_XLOCKDONE &&
-				  lock->get_xlock_by_client() == client))
+      if (!lock->is_stable() && (lock->get_state() != LOCK_XLOCKDONE ||
+				 lock->get_xlock_by_client() != client ||
+				 lock->is_waiter_for(SimpleLock::WAIT_STABLE)))
 	break;
 
       if (lock->get_state() == LOCK_LOCK || lock->get_state() == LOCK_XLOCKDONE) {
@@ -1557,7 +1548,7 @@ bool Locker::xlock_start(SimpleLock *lock, MDRequestRef& mut)
     }
     
     // wait for active auth
-    int auth = lock->get_parent()->authority().first;
+    mds_rank_t auth = lock->get_parent()->authority().first;
     if (!mds->mdsmap->is_clientreplay_or_active_or_stopping(auth)) {
       dout(7) << " mds." << auth << " is not active" << dendl;
       if (mut->more()->waiting_on_slave.empty())
@@ -1630,7 +1621,7 @@ void Locker::xlock_finish(SimpleLock *lock, MutationImpl *mut, bool *pneed_issue
 
     // tell auth
     dout(7) << "xlock_finish releasing remote xlock on " << *lock->get_parent()  << dendl;
-    int auth = lock->get_parent()->authority().first;
+    mds_rank_t auth = lock->get_parent()->authority().first;
     if (mds->mdsmap->get_state(auth) >= MDSMap::STATE_REJOIN) {
       MMDSSlaveRequest *slavereq = new MMDSSlaveRequest(mut->reqid, mut->attempt,
 							MMDSSlaveRequest::OP_UNXLOCK);
@@ -1724,8 +1715,18 @@ void Locker::file_update_finish(CInode *in, MutationRef& mut, bool share, client
 
   mut->apply();
   
-  if (ack)
-    mds->send_message_client_counted(ack, client);
+  if (ack) {
+    Session *session = mds->get_session(client);
+    if (session) {
+      // "oldest flush tid" > 0 means client uses unique TID for each flush
+      if (ack->get_oldest_flush_tid() > 0)
+	session->add_completed_flush(ack->get_client_tid());
+      mds->send_message_client_counted(ack, session);
+    } else {
+      dout(10) << " no session for client." << client << " " << *ack << dendl;
+      ack->put();
+    }
+  }
 
   set<CInode*> need_issue;
   drop_locks(mut.get(), &need_issue);
@@ -1734,7 +1735,7 @@ void Locker::file_update_finish(CInode *in, MutationRef& mut, bool share, client
     dout(10) << " client_snap_caps " << in->client_snap_caps << dendl;
     // check for snap writeback completion
     bool gather = false;
-    map<int,set<client_t> >::iterator p = in->client_snap_caps.begin();
+    compact_map<int,set<client_t> >::iterator p = in->client_snap_caps.begin();
     while (p != in->client_snap_caps.end()) {
       SimpleLock *lock = in->get_lock(p->first);
       assert(lock);
@@ -1886,7 +1887,7 @@ bool Locker::issue_caps(CInode *in, Capability *only_cap)
     allowed |= xlocker_allowed & in->get_xlocker_mask(it->first);
 
     Session *session = mds->get_session(it->first);
-    if (in->inode.inline_version != CEPH_INLINE_NONE &&
+    if (in->inode.inline_data.version != CEPH_INLINE_NONE &&
 	!(session && session->connection &&
 	  session->connection->has_feature(CEPH_FEATURE_MDS_INLINE_DATA)))
       allowed &= ~(CEPH_CAP_FILE_RD | CEPH_CAP_FILE_WR);
@@ -1940,6 +1941,7 @@ bool Locker::issue_caps(CInode *in, Capability *only_cap)
 	int op = (before & ~after) ? CEPH_CAP_OP_REVOKE : CEPH_CAP_OP_GRANT;
 	if (op == CEPH_CAP_OP_REVOKE) {
 		revoking_caps.push_back(&cap->item_revoking_caps);
+		revoking_caps_by_client[cap->get_client()].push_back(&cap->item_client_revoking_caps);
 		cap->set_last_revoke_stamp(ceph_clock_now(g_ceph_context));
 		cap->reset_num_revoke_warnings();
 	}
@@ -1948,7 +1950,8 @@ bool Locker::issue_caps(CInode *in, Capability *only_cap)
 					 in->find_snaprealm()->inode->ino(),
 					 cap->get_cap_id(), cap->get_last_seq(),
 					 after, wanted, 0,
-					 cap->get_mseq());
+					 cap->get_mseq(),
+                                         mds->get_osd_epoch_barrier());
 	in->encode_cap_message(m, cap);
 
 	mds->send_message_client_counted(m, it->first);
@@ -1975,7 +1978,8 @@ void Locker::issue_truncate(CInode *in)
 				     in->find_snaprealm()->inode->ino(),
 				     cap->get_cap_id(), cap->get_last_seq(),
 				     cap->pending(), cap->wanted(), 0,
-				     cap->get_mseq());
+				     cap->get_mseq(),
+                                     mds->get_osd_epoch_barrier());
     in->encode_cap_message(m, cap);			     
     mds->send_message_client_counted(m, it->first);
   }
@@ -2076,7 +2080,7 @@ void Locker::request_inode_file_caps(CInode *in)
       return;
     }
 
-    int auth = in->authority().first;
+    mds_rank_t auth = in->authority().first;
     if (mds->mdsmap->get_state(auth) == MDSMap::STATE_REJOIN) {
       mds->wait_for_active_peer(auth, new C_MDL_RequestInodeFileCaps(this, in));
       return;
@@ -2102,7 +2106,7 @@ void Locker::handle_inode_file_caps(MInodeFileCaps *m)
 
   // ok
   CInode *in = mdcache->get_inode(m->get_ino());
-  int from = m->get_source().num();
+  mds_rank_t from = mds_rank_t(m->get_source().num());
 
   assert(in);
   assert(in->is_auth());
@@ -2326,7 +2330,8 @@ void Locker::share_inode_max_size(CInode *in, Capability *only_cap)
 				       in->find_snaprealm()->inode->ino(),
 				       cap->get_cap_id(), cap->get_last_seq(),
 				       cap->pending(), cap->wanted(), 0,
-				       cap->get_mseq());
+                                       cap->get_mseq(),
+                                       mds->get_osd_epoch_barrier());
       in->encode_cap_message(m, cap);
       mds->send_message_client_counted(m, client);
     }
@@ -2388,18 +2393,15 @@ void Locker::adjust_cap_wanted(Capability *cap, int wanted, int issue_seq)
 
 
 
-void Locker::_do_null_snapflush(CInode *head_in, client_t client, snapid_t follows)
+void Locker::_do_null_snapflush(CInode *head_in, client_t client)
 {
-  dout(10) << "_do_null_snapflish client." << client << " follows " << follows << " on " << *head_in << dendl;
-  map<snapid_t, set<client_t> >::iterator p = head_in->client_need_snapflush.begin();
+  dout(10) << "_do_null_snapflush client." << client << " on " << *head_in << dendl;
+  compact_map<snapid_t, set<client_t> >::iterator p = head_in->client_need_snapflush.begin();
   while (p != head_in->client_need_snapflush.end()) {
     snapid_t snapid = p->first;
     set<client_t>& clients = p->second;
     ++p;  // be careful, q loop below depends on this
 
-    // snapid is the snap inode's ->last
-    if (follows > snapid)
-      break;
     if (clients.count(client)) {
       dout(10) << " doing async NULL snapflush on " << snapid << " from client." << client << dendl;
       CInode *sin = mdcache->get_inode(head_in->ino(), snapid);
@@ -2407,7 +2409,7 @@ void Locker::_do_null_snapflush(CInode *head_in, client_t client, snapid_t follo
 	// hrm, look forward until we find the inode. 
 	//  (we can only look it up by the last snapid it is valid for)
 	dout(10) << " didn't have " << head_in->ino() << " snapid " << snapid << dendl;
-	for (map<snapid_t, set<client_t> >::iterator q = p;  // p is already at next entry
+	for (compact_map<snapid_t, set<client_t> >::iterator q = p;  // p is already at next entry
 	     q != head_in->client_need_snapflush.end();
 	     ++q) {
 	  dout(10) << " trying snapid " << q->first << dendl;
@@ -2452,16 +2454,65 @@ bool Locker::should_defer_client_cap_frozen(CInode *in)
  */
 void Locker::handle_client_caps(MClientCaps *m)
 {
+  Session *session = static_cast<Session *>(m->get_connection()->get_priv());
   client_t client = m->get_source().num();
 
   snapid_t follows = m->get_snap_follows();
   dout(7) << "handle_client_caps on " << m->get_ino()
-	  << " follows " << follows 
+	  << " tid " << m->get_client_tid() << " follows " << follows
 	  << " op " << ceph_cap_op_name(m->get_op()) << dendl;
 
   if (!mds->is_clientreplay() && !mds->is_active() && !mds->is_stopping()) {
+    if (mds->is_reconnect() &&
+	m->get_dirty() && m->get_client_tid() > 0 &&
+	session->have_completed_flush(m->get_client_tid())) {
+      mdcache->set_reconnect_dirty_caps(m->get_ino(), m->get_dirty());
+    }
     mds->wait_for_replay(new C_MDS_RetryMessage(mds, m));
     return;
+  }
+
+  if (m->get_client_tid() > 0 &&
+      session->have_completed_flush(m->get_client_tid())) {
+    dout(7) << "handle_client_caps already flushed tid " << m->get_client_tid()
+	    << " for client." << client << dendl;
+    MClientCaps *ack;
+    if (m->get_op() == CEPH_CAP_OP_FLUSHSNAP) {
+      ack = new MClientCaps(CEPH_CAP_OP_FLUSHSNAP_ACK, m->get_ino(), 0, 0, 0, 0, 0,
+			    m->get_dirty(), 0, mds->get_osd_epoch_barrier());
+    } else {
+      ack = new MClientCaps(CEPH_CAP_OP_FLUSH_ACK, m->get_ino(), 0, m->get_cap_id(),
+			    m->get_seq(), m->get_caps(), 0, m->get_dirty(), 0,
+			    mds->get_osd_epoch_barrier());
+    }
+    ack->set_snap_follows(follows);
+    ack->set_client_tid(m->get_client_tid());
+    mds->send_message_client_counted(ack, m->get_connection());
+    m->put();
+    return;
+  }
+
+  // "oldest flush tid" > 0 means client uses unique TID for each flush
+  if (m->get_oldest_flush_tid() > 0) {
+    if (session->trim_completed_flushes(m->get_oldest_flush_tid())) {
+      mds->mdlog->get_current_segment()->touched_sessions.insert(session->info.inst.name);
+
+      if (session->get_num_trim_flushes_warnings() > 0 &&
+	  session->get_num_completed_flushes() * 2 < g_conf->mds_max_completed_flushes)
+	session->reset_num_trim_flushes_warnings();
+    } else {
+      if (session->get_num_completed_flushes() >=
+	  (g_conf->mds_max_completed_flushes << session->get_num_trim_flushes_warnings())) {
+	session->inc_num_trim_flushes_warnings();
+	stringstream ss;
+	ss << "client." << session->get_client() << " does not advance its oldest_flush_tid ("
+	   << m->get_oldest_flush_tid() << "), "
+	   << session->get_num_completed_flushes()
+	   << " completed flushes recorded in session\n";
+	mds->clog->warn() << ss.str();
+	dout(20) << __func__ << " " << ss.str() << dendl;
+      }
+    }
   }
 
   CInode *head_in = mdcache->get_inode(m->get_ino());
@@ -2471,9 +2522,22 @@ void Locker::handle_client_caps(MClientCaps *m)
     return;
   }
 
-  CInode *in = mdcache->pick_inode_snap(head_in, follows);
-  if (in != head_in)
-    dout(10) << " head inode " << *head_in << dendl;
+  if (m->osd_epoch_barrier && !mds->objecter->have_map(m->osd_epoch_barrier)) {
+    // Pause RADOS operations until we see the required epoch
+    mds->objecter->set_epoch_barrier(m->osd_epoch_barrier);
+  }
+
+  if (mds->get_osd_epoch_barrier() < m->osd_epoch_barrier) {
+    // Record the barrier so that we will retransmit it to clients
+    mds->set_osd_epoch_barrier(m->osd_epoch_barrier);
+  }
+
+  CInode *in = head_in;
+  if (follows > 0) {
+    in = mdcache->pick_inode_snap(head_in, follows);
+    if (in != head_in)
+      dout(10) << " head inode " << *head_in << dendl;
+  }
   dout(10) << "  cap inode " << *in << dendl;
 
   Capability *cap = 0;
@@ -2513,6 +2577,17 @@ void Locker::handle_client_caps(MClientCaps *m)
     snapid_t snap = realm->get_snap_following(follows);
     dout(10) << "  flushsnap follows " << follows << " -> snap " << snap << dendl;
 
+    // we can prepare the ack now, since this FLUSHEDSNAP is independent of any
+    // other cap ops.  (except possibly duplicate FLUSHSNAP requests, but worst
+    // case we get a dup response, so whatever.)
+    MClientCaps *ack = 0;
+    if (m->get_dirty()) {
+      ack = new MClientCaps(CEPH_CAP_OP_FLUSHSNAP_ACK, in->ino(), 0, 0, 0, 0, 0, m->get_dirty(), 0, mds->get_osd_epoch_barrier());
+      ack->set_snap_follows(follows);
+      ack->set_client_tid(m->get_client_tid());
+      ack->set_oldest_flush_tid(m->get_oldest_flush_tid());
+    }
+
     if (in == head_in ||
 	(head_in->client_need_snapflush.count(snap) &&
 	 head_in->client_need_snapflush[snap].count(client))) {
@@ -2520,25 +2595,19 @@ void Locker::handle_client_caps(MClientCaps *m)
 	      << " client." << client << " on " << *in << dendl;
 
       // this cap now follows a later snap (i.e. the one initiating this flush, or later)
-      cap->client_follows = MAX(follows, in->first) + 1;
+      if (in == head_in)
+	cap->client_follows = snap < CEPH_NOSNAP ? snap : realm->get_newest_seq();
    
-      // we can prepare the ack now, since this FLUSHEDSNAP is independent of any
-      // other cap ops.  (except possibly duplicate FLUSHSNAP requests, but worst
-      // case we get a dup response, so whatever.)
-      MClientCaps *ack = 0;
-      if (m->get_dirty()) {
-	ack = new MClientCaps(CEPH_CAP_OP_FLUSHSNAP_ACK, in->ino(), 0, 0, 0, 0, 0, m->get_dirty(), 0);
-	ack->set_snap_follows(follows);
-	ack->set_client_tid(m->get_client_tid());
-      }
-
       _do_snap_update(in, snap, m->get_dirty(), follows, client, m, ack);
 
       if (in != head_in)
 	head_in->remove_need_snapflush(in, snap, client);
       
-    } else
+    } else {
       dout(7) << " not expecting flushsnap " << snap << " from client." << client << " on " << *in << dendl;
+      if (ack)
+	mds->send_message_client_counted(ack, m->get_connection());
+    }
     goto out;
   }
 
@@ -2580,7 +2649,7 @@ void Locker::handle_client_caps(MClientCaps *m)
     //  update/release).
     if (!head_in->client_need_snapflush.empty()) {
       if ((cap->issued() & CEPH_CAP_ANY_FILE_WR) == 0) {
-	_do_null_snapflush(head_in, client, follows);
+	_do_null_snapflush(head_in, client);
       } else {
 	dout(10) << " revocation in progress, not making any conclusions about null snapflushes" << dendl;
       }
@@ -2590,8 +2659,9 @@ void Locker::handle_client_caps(MClientCaps *m)
       dout(7) << " flush client." << client << " dirty " << ccap_string(m->get_dirty()) 
 	      << " seq " << m->get_seq() << " on " << *in << dendl;
       ack = new MClientCaps(CEPH_CAP_OP_FLUSH_ACK, in->ino(), 0, cap->get_cap_id(), m->get_seq(),
-			    m->get_caps(), 0, m->get_dirty(), 0);
+			    m->get_caps(), 0, m->get_dirty(), 0, mds->get_osd_epoch_barrier());
       ack->set_client_tid(m->get_client_tid());
+      ack->set_oldest_flush_tid(m->get_oldest_flush_tid());
     }
 
     // filter wanted based on what we could ever give out (given auth/replica status)
@@ -2714,6 +2784,12 @@ void Locker::process_request_cap_release(MDRequestRef& mdr, client_t client, con
     caps &= cap->issued();
   }
   cap->confirm_receipt(seq, caps);
+
+  if (!in->client_need_snapflush.empty() &&
+      (cap->issued() & CEPH_CAP_ANY_FILE_WR) == 0) {
+    _do_null_snapflush(in, client);
+  }
+
   adjust_cap_wanted(cap, wanted, issue_seq);
   
   if (mdr)
@@ -2782,6 +2858,9 @@ static uint64_t calc_bounding(uint64_t t)
   return t + 1;
 }
 
+/**
+ * m and ack might be NULL, so don't dereference them unless dirty != 0
+ */
 void Locker::_do_snap_update(CInode *in, snapid_t snap, int dirty, snapid_t follows, client_t client, MClientCaps *m, MClientCaps *ack)
 {
   dout(10) << "_do_snap_update dirty " << ccap_string(dirty)
@@ -2815,19 +2894,24 @@ void Locker::_do_snap_update(CInode *in, snapid_t snap, int dirty, snapid_t foll
   old_inode_t *oi = 0;
   if (in->is_multiversion()) {
     oi = in->pick_old_inode(snap);
-    if (oi) {
-      dout(10) << " writing into old inode" << dendl;
-      if (xattrs)
-	px = &oi->xattrs;
-    }
   }
-  if (xattrs && !px)
-    px = new map<string,bufferptr>;
 
-  inode_t *pi = in->project_inode(px);
-  pi->version = in->pre_dirty();
-  if (oi)
+  inode_t *pi;
+  if (oi) {
+    dout(10) << " writing into old inode" << dendl;
+    pi = in->project_inode();
+    pi->version = in->pre_dirty();
+    if (snap > oi->first)
+      in->split_old_inode(snap);
     pi = &oi->inode;
+    if (xattrs)
+      px = &oi->xattrs;
+  } else {
+    if (xattrs)
+      px = new map<string,bufferptr>;
+    pi = in->project_inode(px);
+    pi->version = in->pre_dirty();
+  }
 
   _update_cap_fields(in, dirty, m, pi);
 
@@ -2841,7 +2925,7 @@ void Locker::_do_snap_update(CInode *in, snapid_t snap, int dirty, snapid_t foll
   }
 
   if (pi->client_ranges.count(client)) {
-    if (in->last == follows+1) {
+    if (in->last == snap) {
       dout(10) << "  removing client_range entirely" << dendl;
       pi->client_ranges.erase(client);
     } else {
@@ -2854,20 +2938,33 @@ void Locker::_do_snap_update(CInode *in, snapid_t snap, int dirty, snapid_t foll
   mdcache->predirty_journal_parents(mut, &le->metablob, in, 0, PREDIRTY_PRIMARY, 0, follows);
   mdcache->journal_dirty_inode(mut.get(), &le->metablob, in, follows);
 
+  // "oldest flush tid" > 0 means client uses unique TID for each flush
+  if (ack && ack->get_oldest_flush_tid() > 0)
+    le->metablob.add_client_flush(metareqid_t(m->get_source(), ack->get_client_tid()),
+				  ack->get_oldest_flush_tid());
+
   mds->mdlog->submit_entry(le, new C_Locker_FileUpdate_finish(this, in, mut,
 								 false,
 								 client, NULL,
 								 ack));
 }
 
-
+/**
+ * m might be NULL, so don't dereference it unless dirty != 0.
+ */
 void Locker::_update_cap_fields(CInode *in, int dirty, MClientCaps *m, inode_t *pi)
 {
+
+  if (dirty && m->get_ctime() > pi->ctime) {
+    dout(7) << "  ctime " << pi->ctime << " -> " << m->get_ctime()
+	    << " for " << *in << dendl;
+    pi->ctime = m->get_ctime();
+  }
+
   // file
   if (dirty & (CEPH_CAP_FILE_EXCL|CEPH_CAP_FILE_WR)) {
     utime_t atime = m->get_atime();
     utime_t mtime = m->get_mtime();
-    utime_t ctime = m->get_ctime();
     uint64_t size = m->get_size();
     version_t inline_version = m->inline_version;
     
@@ -2876,11 +2973,6 @@ void Locker::_update_cap_fields(CInode *in, int dirty, MClientCaps *m, inode_t *
       dout(7) << "  mtime " << pi->mtime << " -> " << mtime
 	      << " for " << *in << dendl;
       pi->mtime = mtime;
-    }
-    if (ctime > pi->ctime) {
-      dout(7) << "  ctime " << pi->ctime << " -> " << ctime
-	      << " for " << *in << dendl;
-      pi->ctime = ctime;
     }
     if (in->inode.is_file() &&   // ONLY if regular file
 	size > pi->size) {
@@ -2891,9 +2983,12 @@ void Locker::_update_cap_fields(CInode *in, int dirty, MClientCaps *m, inode_t *
     }
     if (in->inode.is_file() &&
         (dirty & CEPH_CAP_FILE_WR) &&
-        inline_version > pi->inline_version) {
-      pi->inline_version = inline_version;
-      pi->inline_data = m->inline_data;
+        inline_version > pi->inline_data.version) {
+      pi->inline_data.version = inline_version;
+      if (inline_version != CEPH_INLINE_NONE && m->inline_data.length() > 0)
+	pi->inline_data.get_data() = m->inline_data;
+      else
+	pi->inline_data.free_data();
     }
     if ((dirty & CEPH_CAP_FILE_EXCL) && atime != pi->atime) {
       dout(7) << "  atime " << pi->atime << " -> " << atime
@@ -3024,23 +3119,29 @@ bool Locker::_do_cap_update(CInode *in, Capability *cap,
     for ( int i=0; i < num_locks; ++i) {
       ceph_filelock decoded_lock;
       ::decode(decoded_lock, bli);
-      in->fcntl_locks.held_locks.
+      in->get_fcntl_lock_state()->held_locks.
 	insert(pair<uint64_t, ceph_filelock>(decoded_lock.start, decoded_lock));
-      ++in->fcntl_locks.client_held_lock_counts[(client_t)(decoded_lock.client)];
+      ++in->get_fcntl_lock_state()->client_held_lock_counts[(client_t)(decoded_lock.client)];
     }
     ::decode(num_locks, bli);
     for ( int i=0; i < num_locks; ++i) {
       ceph_filelock decoded_lock;
       ::decode(decoded_lock, bli);
-      in->flock_locks.held_locks.
+      in->get_flock_lock_state()->held_locks.
 	insert(pair<uint64_t, ceph_filelock>(decoded_lock.start, decoded_lock));
-      ++in->flock_locks.client_held_lock_counts[(client_t)(decoded_lock.client)];
+      ++in->get_flock_lock_state()->client_held_lock_counts[(client_t)(decoded_lock.client)];
     }
   }
 
   if (!dirty && !change_max)
     return false;
 
+  Session *session = static_cast<Session *>(m->get_connection()->get_priv());
+  if (!session->check_access(in, MAY_WRITE, m->caller_uid, m->caller_gid, 0, 0)) {
+    dout(10) << "check_access failed, dropping cap update on " << *in << dendl;
+    return false;
+  }
+  session->put();
 
   // do the update.
   EUpdate *le = new EUpdate(mds->mdlog, "cap update");
@@ -3093,6 +3194,11 @@ bool Locker::_do_cap_update(CInode *in, Capability *cap,
   mdcache->predirty_journal_parents(mut, &le->metablob, in, 0, PREDIRTY_PRIMARY, 0, follows);
   mdcache->journal_dirty_inode(mut.get(), &le->metablob, in, follows);
 
+  // "oldest flush tid" > 0 means client uses unique TID for each flush
+  if (ack && ack->get_oldest_flush_tid() > 0)
+    le->metablob.add_client_flush(metareqid_t(m->get_source(), ack->get_client_tid()),
+				  ack->get_oldest_flush_tid());
+
   mds->mdlog->submit_entry(le, new C_Locker_FileUpdate_finish(this, in, mut,
 								 change_max,
 								 client, cap,
@@ -3121,8 +3227,25 @@ void Locker::handle_client_cap_release(MClientCapRelease *m)
     return;
   }
 
-  for (vector<ceph_mds_cap_item>::iterator p = m->caps.begin(); p != m->caps.end(); ++p)
+  if (m->osd_epoch_barrier && !mds->objecter->have_map(m->osd_epoch_barrier)) {
+    // Pause RADOS operations until we see the required epoch
+    mds->objecter->set_epoch_barrier(m->osd_epoch_barrier);
+  }
+
+  if (mds->get_osd_epoch_barrier() < m->osd_epoch_barrier) {
+    // Record the barrier so that we will retransmit it to clients
+    mds->set_osd_epoch_barrier(m->osd_epoch_barrier);
+  }
+
+  Session *session = static_cast<Session *>(m->get_connection()->get_priv());
+
+  for (vector<ceph_mds_cap_item>::iterator p = m->caps.begin(); p != m->caps.end(); ++p) {
     _do_cap_release(client, inodeno_t((uint64_t)p->ino) , p->cap_id, p->migrate_seq, p->seq);
+  }
+
+  if (session) {
+    session->notify_cap_release(m->caps.size());
+  }
 
   m->put();
 }
@@ -3187,7 +3310,7 @@ void Locker::remove_client_cap(CInode *in, client_t client)
 {
   // clean out any pending snapflush state
   if (!in->client_need_snapflush.empty())
-    _do_null_snapflush(in, client, 0);
+    _do_null_snapflush(in, client);
 
   in->remove_client_cap(client);
 
@@ -3203,27 +3326,91 @@ void Locker::remove_client_cap(CInode *in, client_t client)
   try_eval(in, CEPH_CAP_LOCKS);
 }
 
+
+/**
+ * Return true if any currently revoking caps exceed the
+ * mds_revoke_cap_timeout threshold.
+ */
+bool Locker::any_late_revoking_caps(xlist<Capability*> const &revoking) const
+{
+    xlist<Capability*>::const_iterator p = revoking.begin();
+    if (p.end()) {
+      // No revoking caps at the moment
+      return false;
+    } else {
+      utime_t now = ceph_clock_now(g_ceph_context);
+      utime_t age = now - (*p)->get_last_revoke_stamp();
+      if (age <= g_conf->mds_revoke_cap_timeout) {
+          return false;
+      } else {
+          return true;
+      }
+    }
+}
+
+
+void Locker::get_late_revoking_clients(std::list<client_t> *result) const
+{
+  if (!any_late_revoking_caps(revoking_caps)) {
+    // Fast path: no misbehaving clients, execute in O(1)
+    return;
+  }
+
+  // Slow path: execute in O(N_clients)
+  std::map<client_t, xlist<Capability*> >::const_iterator client_rc_iter;
+  for (client_rc_iter = revoking_caps_by_client.begin();
+       client_rc_iter != revoking_caps_by_client.end(); ++client_rc_iter) {
+    xlist<Capability*> const &client_rc = client_rc_iter->second;
+    bool any_late = any_late_revoking_caps(client_rc);
+    if (any_late) {
+        result->push_back(client_rc_iter->first);
+    }
+  }
+}
+
+// Hard-code instead of surfacing a config settings because this is
+// really a hack that should go away at some point when we have better
+// inspection tools for getting at detailed cap state (#7316)
+#define MAX_WARN_CAPS 100
+
 void Locker::caps_tick()
 {
   utime_t now = ceph_clock_now(g_ceph_context);
 
+  dout(20) << __func__ << " " << revoking_caps.size() << " revoking caps" << dendl;
+
+  int i = 0;
   for (xlist<Capability*>::iterator p = revoking_caps.begin(); !p.end(); ++p) {
     Capability *cap = *p;
 
     utime_t age = now - cap->get_last_revoke_stamp();
-    if (age <= g_conf->mds_revoke_cap_timeout)
+    dout(20) << __func__ << " age = " << age << cap->get_client() << "." << cap->get_inode()->ino() << dendl;
+    if (age <= g_conf->mds_revoke_cap_timeout) {
+      dout(20) << __func__ << " age below timeout " << g_conf->mds_revoke_cap_timeout << dendl;
       break;
+    } else {
+      ++i;
+      if (i > MAX_WARN_CAPS) {
+        dout(1) << __func__ << " more than " << MAX_WARN_CAPS << " caps are late"
+          << "revoking, ignoring subsequent caps" << dendl;
+        break;
+      }
+    }
     // exponential backoff of warning intervals
     if (age > g_conf->mds_revoke_cap_timeout * (1 << cap->get_num_revoke_warnings())) {
       cap->inc_num_revoke_warnings();
       stringstream ss;
-      ss << "client." << cap->get_client() << " isn't responding to MClientCaps(revoke), ino "
+      ss << "client." << cap->get_client() << " isn't responding to mclientcaps(revoke), ino "
 	 << cap->get_inode()->ino() << " pending " << ccap_string(cap->pending())
 	 << " issued " << ccap_string(cap->issued()) << ", sent " << age << " seconds ago\n";
       mds->clog->warn() << ss.str();
+      dout(20) << __func__ << " " << ss.str() << dendl;
+    } else {
+      dout(20) << __func__ << " silencing log message (backoff) for " << cap->get_client() << "." << cap->get_inode()->ino() << dendl;
     }
   }
 }
+
 
 void Locker::handle_client_lease(MClientLease *m)
 {
@@ -3611,6 +3798,14 @@ void Locker::simple_eval(SimpleLock *lock, bool *need_issue)
 	 lock->get_state() == LOCK_SYNC ||
 	 lock->get_parent()->is_frozen()))
       return;
+  }
+
+  if (mdcache->is_readonly()) {
+    if (lock->get_state() != LOCK_SYNC) {
+      dout(10) << "simple_eval read-only FS, syncing " << *lock << " on " << *lock->get_parent() << dendl;
+      simple_sync(lock, need_issue);
+    }
+    return;
   }
 
   CInode *in = 0;
@@ -4040,6 +4235,14 @@ void Locker::scatter_eval(ScatterLock *lock, bool *need_issue)
     dout(20) << "  freezing|frozen" << dendl;
     return;
   }
+
+  if (mdcache->is_readonly()) {
+    if (lock->get_state() != LOCK_SYNC) {
+      dout(10) << "scatter_eval read-only FS, syncing " << *lock << " on " << *lock->get_parent() << dendl;
+      simple_sync(lock, need_issue);
+    }
+    return;
+  }
   
   if (!lock->is_rdlocked() &&
       lock->get_state() != LOCK_MIX &&
@@ -4147,6 +4350,14 @@ void Locker::scatter_nudge(ScatterLock *lock, MDSInternalContextBase *c, bool fo
 	}
 	*/
 
+	if (mdcache->is_readonly()) {
+	  if (lock->get_state() != LOCK_SYNC) {
+	    dout(10) << "scatter_nudge auth, read-only FS, syncing " << *lock << " on " << *p << dendl;
+	    simple_sync(static_cast<ScatterLock*>(lock));
+	  }
+	  break;
+	}
+
 	// adjust lock state
 	dout(10) << "scatter_nudge auth, scatter/unscattering " << *lock << " on " << *p << dendl;
 	switch (lock->get_type()) {
@@ -4192,7 +4403,7 @@ void Locker::scatter_nudge(ScatterLock *lock, MDSInternalContextBase *c, bool fo
     dout(10) << "scatter_nudge replica, requesting scatter/unscatter of " 
 	     << *lock << " on " << *p << dendl;
     // request unscatter?
-    int auth = lock->get_parent()->authority().first;
+    mds_rank_t auth = lock->get_parent()->authority().first;
     if (mds->mdsmap->is_clientreplay_or_active_or_stopping(auth))
       mds->send_message_mds(new MLock(lock, LOCK_AC_NUDGE, mds->get_nodeid()), auth);
 
@@ -4388,6 +4599,14 @@ void Locker::file_eval(ScatterLock *lock, bool *need_issue)
 
   if (lock->get_parent()->is_freezing_or_frozen())
     return;
+
+  if (mdcache->is_readonly()) {
+    if (lock->get_state() != LOCK_SYNC) {
+      dout(10) << "file_eval read-only FS, syncing " << *lock << " on " << *lock->get_parent() << dendl;
+      simple_sync(lock, need_issue);
+    }
+    return;
+  }
 
   // excl -> *?
   if (lock->get_state() == LOCK_EXCL) {

@@ -329,9 +329,9 @@ static void grants_by_type_add_one_grant(map<int, string>& grants_by_type, int p
     default:
       id_type_str = "id";
   }
-  string id;
+  rgw_user id;
   grant.get_id(id);
-  s.append(id_type_str + "=\"" + id + "\"");
+  s.append(id_type_str + "=\"" + id.to_str() + "\"");
 }
 
 struct grant_type_to_header {
@@ -382,7 +382,7 @@ static void add_grants_headers(map<int, string>& grants, map<string, string, lts
 
 int RGWRESTStreamWriteRequest::put_obj_init(RGWAccessKey& key, rgw_obj& obj, uint64_t obj_size, map<string, bufferlist>& attrs)
 {
-  string resource = obj.bucket.name + "/" + obj.object;
+  string resource = obj.bucket.name + "/" + obj.get_object();
   string new_url = url;
   if (new_url[new_url.size() - 1] != '/')
     new_url.append("/");
@@ -406,7 +406,6 @@ int RGWRESTStreamWriteRequest::put_obj_init(RGWAccessKey& key, rgw_obj& obj, uin
   new_info.script_uri = "/";
   new_info.script_uri.append(resource);
   new_info.request_uri = new_info.script_uri;
-  new_info.effective_uri = new_info.effective_uri;
 
   map<string, string, ltstr_nocase>& m = new_env.get_map();
   map<string, bufferlist>::iterator bliter;
@@ -545,7 +544,7 @@ int RGWRESTStreamReadRequest::get_obj(RGWAccessKey& key, map<string, string>& ex
 {
   string urlsafe_bucket, urlsafe_object;
   url_encode(obj.bucket.name, urlsafe_bucket);
-  url_encode(obj.object, urlsafe_object);
+  url_encode(obj.get_object(), urlsafe_object);
   string resource = urlsafe_bucket + "/" + urlsafe_object;
   string new_url = url;
   if (new_url[new_url.size() - 1] != '/')
@@ -575,7 +574,6 @@ int RGWRESTStreamReadRequest::get_obj(RGWAccessKey& key, map<string, string>& ex
   new_info.script_uri = "/";
   new_info.script_uri.append(resource);
   new_info.request_uri = new_info.script_uri;
-  new_info.effective_uri = new_info.effective_uri;
 
   new_info.init_meta_info(NULL);
 

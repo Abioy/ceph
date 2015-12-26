@@ -114,6 +114,10 @@
 #define MSG_OSD_EC_READ        110
 #define MSG_OSD_EC_READ_REPLY  111
 
+#define MSG_OSD_REPOP         112
+#define MSG_OSD_REPOPREPLY    113
+
+
 // *** MDS ***
 
 #define MSG_MDS_BEACON             100  // to monitor
@@ -157,6 +161,7 @@
 
 #define MSG_MDS_EXPORTCAPS            0x470
 #define MSG_MDS_EXPORTCAPSACK         0x471
+#define MSG_MDS_GATHERCAPS            0x472
 
 #define MSG_MDS_HEARTBEAT          0x500  // for mds load balancer
 
@@ -164,10 +169,36 @@
 #define MSG_TIMECHECK             0x600
 #define MSG_MON_HEALTH            0x601
 
+// *** Message::encode() crcflags bits ***
+#define MSG_CRC_DATA           (1 << 0)
+#define MSG_CRC_HEADER         (1 << 1)
+#define MSG_CRC_ALL            (MSG_CRC_DATA | MSG_CRC_HEADER)
+
+// Xio Testing
+#define MSG_DATA_PING		  0x602
+
+// Xio intends to define messages 0x603..0x606
+
+// Special
+#define MSG_NOP                   0x607
 
 // ======================================================
 
 // abstract Message class
+
+namespace bi = boost::intrusive;
+
+// XioMessenger conditional trace flags
+#define MSG_MAGIC_XIO          0x0002
+#define MSG_MAGIC_TRACE_XCON   0x0004
+#define MSG_MAGIC_TRACE_DTOR   0x0008
+#define MSG_MAGIC_TRACE_HDR    0x0010
+#define MSG_MAGIC_TRACE_XIO    0x0020
+#define MSG_MAGIC_TRACE_XMSGR  0x0040
+#define MSG_MAGIC_TRACE_CTR    0x0080
+
+// XioMessenger diagnostic "ping pong" flag (resend msg when send completes)
+#define MSG_MAGIC_REDUPE       0x0100
 
 class Message : public RefCountedObject {
 protected:
@@ -192,6 +223,8 @@ protected:
 
   uint32_t magic;
 
+  bi::list_member_hook<> dispatch_q;
+
 public:
   class CompletionHook : public Context {
   protected:
@@ -200,9 +233,12 @@ public:
   public:
     CompletionHook(Message *_m) : m(_m) {}
     virtual void set_message(Message *_m) { m = _m; }
-    virtual void finish(int r) = 0;
-    virtual ~CompletionHook() {}
   };
+
+  typedef bi::list< Message,
+		    bi::member_hook< Message,
+				     bi::list_member_hook<>,
+				     &Message::dispatch_q > > Queue;
 
 protected:
   CompletionHook* completion_hook; // owned by Messenger
@@ -265,7 +301,7 @@ protected:
       completion_hook->complete(0);
   }
 public:
-  inline const ConnectionRef& get_connection() { return connection; }
+  inline const ConnectionRef& get_connection() const { return connection; }
   void set_connection(const ConnectionRef& c) {
     connection = c;
   }
@@ -277,14 +313,17 @@ public:
   Throttle *get_message_throttler() { return msg_throttler; }
 
   void set_dispatch_throttle_size(uint64_t s) { dispatch_throttle_size = s; }
-  uint64_t get_dispatch_throttle_size() { return dispatch_throttle_size; }
+  uint64_t get_dispatch_throttle_size() const { return dispatch_throttle_size; }
 
+  const ceph_msg_header &get_header() const { return header; }
   ceph_msg_header &get_header() { return header; }
   void set_header(const ceph_msg_header &e) { header = e; }
   void set_footer(const ceph_msg_footer &e) { footer = e; }
+  const ceph_msg_footer &get_footer() const { return footer; }
   ceph_msg_footer &get_footer() { return footer; }
+  void set_src(const entity_name_t& src) { header.src = src; }
 
-  uint32_t get_magic() { return magic; }
+  uint32_t get_magic() const { return magic; }
   void set_magic(int _magic) { magic = _magic; }
 
   /*
@@ -309,12 +348,12 @@ public:
     clear_buffers(); // let subclass drop buffers as well
   }
 
-  bool empty_payload() { return payload.length() == 0; }
+  bool empty_payload() const { return payload.length() == 0; }
   bufferlist& get_payload() { return payload; }
   void set_payload(bufferlist& bl) {
     if (byte_throttler)
       byte_throttler->put(payload.length());
-    payload.claim(bl);
+    payload.claim(bl, buffer::list::CLAIM_ALLOW_NONSHAREABLE);
     if (byte_throttler)
       byte_throttler->take(payload.length());
   }
@@ -322,25 +361,26 @@ public:
   void set_middle(bufferlist& bl) {
     if (byte_throttler)
       byte_throttler->put(payload.length());
-    middle.claim(bl);
+    middle.claim(bl, buffer::list::CLAIM_ALLOW_NONSHAREABLE);
     if (byte_throttler)
       byte_throttler->take(payload.length());
   }
   bufferlist& get_middle() { return middle; }
 
-  void set_data(const bufferlist &d) {
+  void set_data(const bufferlist &bl) {
     if (byte_throttler)
       byte_throttler->put(data.length());
-    data = d;
+    data.share(bl);
     if (byte_throttler)
       byte_throttler->take(data.length());
   }
 
   bufferlist& get_data() { return data; }
-  void claim_data(bufferlist& bl) {
+  void claim_data(bufferlist& bl,
+		  unsigned int flags = buffer::list::CLAIM_DEFAULT) {
     if (byte_throttler)
       byte_throttler->put(data.length());
-    bl.claim(data);
+    bl.claim(data, flags);
   }
   off_t get_data_len() { return data.length(); }
 
@@ -416,11 +456,12 @@ public:
 
   virtual void dump(Formatter *f) const;
 
-  void encode(uint64_t features, bool datacrc);
+  void encode(uint64_t features, int crcflags);
 };
 typedef boost::intrusive_ptr<Message> MessageRef;
 
-extern Message *decode_message(CephContext *cct, ceph_msg_header &header,
+extern Message *decode_message(CephContext *cct, int crcflags,
+			       ceph_msg_header &header,
 			       ceph_msg_footer& footer, bufferlist& front,
 			       bufferlist& middle, bufferlist& data);
 inline ostream& operator<<(ostream& out, Message& m) {
@@ -431,6 +472,7 @@ inline ostream& operator<<(ostream& out, Message& m) {
 }
 
 extern void encode_message(Message *m, uint64_t features, bufferlist& bl);
-extern Message *decode_message(CephContext *cct, bufferlist::iterator& bl);
+extern Message *decode_message(CephContext *cct, int crcflags,
+                               bufferlist::iterator& bl);
 
 #endif

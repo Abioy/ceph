@@ -15,6 +15,8 @@
 #include "include/rados/librados.hpp"
 #include "mds/JournalPointer.h"
 
+#include "mds/events/ESubtreeMap.h"
+
 #include "JournalScanner.h"
 
 #define dout_subsys ceph_subsys_mds
@@ -132,8 +134,6 @@ int JournalScanner::scan_header()
 
 int JournalScanner::scan_events()
 {
-  int r;
-
   uint64_t object_size = g_conf->mds_log_segment_size;
   if (object_size == 0) {
     // Default layout object size
@@ -154,10 +154,17 @@ int JournalScanner::scan_events()
   bool gap = false;
   uint64_t gap_start = -1;
   for (uint64_t obj_offset = (read_offset / object_size); ; obj_offset++) {
+    uint64_t offset_in_obj = 0;
+    if (obj_offset * object_size < header->expire_pos) {
+      // Skip up to expire_pos from start of the object
+      // (happens for the first object we read)
+      offset_in_obj = header->expire_pos - obj_offset * object_size;
+    }
+
     // Read this journal segment
     bufferlist this_object;
     std::string const oid = obj_name(obj_offset);
-    r = io.read(oid, this_object, INT_MAX, 0);
+    int r = io.read(oid, this_object, INT_MAX, offset_in_obj);
 
     // Handle absent journal segments
     if (r < 0) {
@@ -251,8 +258,20 @@ int JournalScanner::scan_events()
         }
 
         LogEvent *le = LogEvent::decode(le_bl);
+
         if (le) {
           dout(10) << "Valid entry at 0x" << std::hex << read_offset << std::dec << dendl;
+
+          if (le->get_type() == EVENT_SUBTREEMAP
+              || le->get_type() == EVENT_SUBTREEMAP_TEST) {
+            ESubtreeMap *sle = dynamic_cast<ESubtreeMap*>(le);
+            if (sle->expire_pos > read_offset) {
+              errors.insert(std::make_pair(
+                    read_offset, EventError(
+                      -ERANGE,
+                      "ESubtreeMap has expire_pos ahead of its own position")));
+            }
+          }
 
           if (filter.apply(read_offset, *le)) {
             events[read_offset] = EventRecord(le, consumed);

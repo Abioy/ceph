@@ -16,39 +16,58 @@
 #ifndef CEPH_MEMSTORE_H
 #define CEPH_MEMSTORE_H
 
-#include "include/assert.h"
+#include <mutex>
+#include <boost/intrusive_ptr.hpp>
+
 #include "include/unordered_map.h"
 #include "include/memory.h"
+#include "include/Spinlock.h"
 #include "common/Finisher.h"
+#include "common/RefCountedObj.h"
 #include "common/RWLock.h"
 #include "ObjectStore.h"
+#include "PageSet.h"
+#include "include/assert.h"
 
 class MemStore : public ObjectStore {
+private:
+  CephContext *const cct;
+
 public:
-  struct Object {
-    bufferlist data;
+  struct Object : public RefCountedObject {
+    std::mutex xattr_mutex;
+    std::mutex omap_mutex;
     map<string,bufferptr> xattr;
     bufferlist omap_header;
     map<string,bufferlist> omap;
 
-    void encode(bufferlist& bl) const {
-      ENCODE_START(1, 1, bl);
-      ::encode(data, bl);
+    typedef boost::intrusive_ptr<Object> Ref;
+    friend void intrusive_ptr_add_ref(Object *o) { o->get(); }
+    friend void intrusive_ptr_release(Object *o) { o->put(); }
+
+    // interface for object data
+    virtual size_t get_size() const = 0;
+    virtual int read(uint64_t offset, uint64_t len, bufferlist &bl) = 0;
+    virtual int write(uint64_t offset, const bufferlist &bl) = 0;
+    virtual int clone(Object *src, uint64_t srcoff, uint64_t len,
+                      uint64_t dstoff) = 0;
+    virtual int truncate(uint64_t offset) = 0;
+    virtual void encode(bufferlist& bl) const = 0;
+    virtual void decode(bufferlist::iterator& p) = 0;
+
+    void encode_base(bufferlist& bl) const {
       ::encode(xattr, bl);
       ::encode(omap_header, bl);
       ::encode(omap, bl);
-      ENCODE_FINISH(bl);
     }
-    void decode(bufferlist::iterator& p) {
-      DECODE_START(1, p);
-      ::decode(data, p);
+    void decode_base(bufferlist::iterator& p) {
       ::decode(xattr, p);
       ::decode(omap_header, p);
       ::decode(omap, p);
-      DECODE_FINISH(p);
     }
+
     void dump(Formatter *f) const {
-      f->dump_int("data_len", data.length());
+      f->dump_int("data_len", get_size());
       f->dump_int("omap_header_len", omap_header.length());
 
       f->open_array_section("xattrs");
@@ -74,13 +93,86 @@ public:
       f->close_section();
     }
   };
-  typedef ceph::shared_ptr<Object> ObjectRef;
+  typedef Object::Ref ObjectRef;
 
-  struct Collection {
+  struct BufferlistObject : public Object {
+    Spinlock mutex;
+    bufferlist data;
+
+    size_t get_size() const override { return data.length(); }
+
+    int read(uint64_t offset, uint64_t len, bufferlist &bl) override;
+    int write(uint64_t offset, const bufferlist &bl) override;
+    int clone(Object *src, uint64_t srcoff, uint64_t len,
+              uint64_t dstoff) override;
+    int truncate(uint64_t offset) override;
+
+    void encode(bufferlist& bl) const override {
+      ENCODE_START(1, 1, bl);
+      ::encode(data, bl);
+      encode_base(bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(bufferlist::iterator& p) override {
+      DECODE_START(1, p);
+      ::decode(data, p);
+      decode_base(p);
+      DECODE_FINISH(p);
+    }
+  };
+
+  struct PageSetObject : public Object {
+    PageSet data;
+    uint64_t data_len;
+#if defined(__GLIBCXX__)
+    // use a thread-local vector for the pages returned by PageSet, so we
+    // can avoid allocations in read/write()
+    static thread_local PageSet::page_vector tls_pages;
+#endif
+
+    PageSetObject(size_t page_size) : data(page_size), data_len(0) {}
+
+    size_t get_size() const override { return data_len; }
+
+    int read(uint64_t offset, uint64_t len, bufferlist &bl) override;
+    int write(uint64_t offset, const bufferlist &bl) override;
+    int clone(Object *src, uint64_t srcoff, uint64_t len,
+              uint64_t dstoff) override;
+    int truncate(uint64_t offset) override;
+
+    void encode(bufferlist& bl) const override {
+      ENCODE_START(1, 1, bl);
+      ::encode(data_len, bl);
+      data.encode(bl);
+      encode_base(bl);
+      ENCODE_FINISH(bl);
+    }
+    void decode(bufferlist::iterator& p) override {
+      DECODE_START(1, p);
+      ::decode(data_len, p);
+      data.decode(p);
+      decode_base(p);
+      DECODE_FINISH(p);
+    }
+  };
+
+  struct Collection : public RefCountedObject {
+    CephContext *cct;
+    bool use_page_set;
     ceph::unordered_map<ghobject_t, ObjectRef> object_hash;  ///< for lookup
-    map<ghobject_t, ObjectRef> object_map;        ///< for iteration
+    map<ghobject_t, ObjectRef,ghobject_t::BitwiseComparator> object_map;        ///< for iteration
     map<string,bufferptr> xattr;
     RWLock lock;   ///< for object_{map,hash}
+
+    typedef boost::intrusive_ptr<Collection> Ref;
+    friend void intrusive_ptr_add_ref(Collection *c) { c->get(); }
+    friend void intrusive_ptr_release(Collection *c) { c->put(); }
+
+    ObjectRef create_object() const {
+      if (use_page_set)
+        return new PageSetObject(cct->_conf->memstore_page_size);
+      return new BufferlistObject();
+    }
 
     // NOTE: The lock only needs to protect the object_map/hash, not the
     // contents of individual objects.  The osd is already sequencing
@@ -88,18 +180,28 @@ public:
     // level.
 
     ObjectRef get_object(ghobject_t oid) {
-      ceph::unordered_map<ghobject_t,ObjectRef>::iterator o = object_hash.find(oid);
+      RWLock::RLocker l(lock);
+      auto o = object_hash.find(oid);
       if (o == object_hash.end())
 	return ObjectRef();
       return o->second;
     }
 
+    ObjectRef get_or_create_object(ghobject_t oid) {
+      RWLock::WLocker l(lock);
+      auto result = object_hash.emplace(oid, ObjectRef());
+      if (result.second)
+        object_map[oid] = result.first->second = create_object();
+      return result.first->second;
+    }
+
     void encode(bufferlist& bl) const {
       ENCODE_START(1, 1, bl);
       ::encode(xattr, bl);
+      ::encode(use_page_set, bl);
       uint32_t s = object_map.size();
       ::encode(s, bl);
-      for (map<ghobject_t, ObjectRef>::const_iterator p = object_map.begin();
+      for (map<ghobject_t, ObjectRef,ghobject_t::BitwiseComparator>::const_iterator p = object_map.begin();
 	   p != object_map.end();
 	   ++p) {
 	::encode(p->first, bl);
@@ -110,12 +212,13 @@ public:
     void decode(bufferlist::iterator& p) {
       DECODE_START(1, p);
       ::decode(xattr, p);
+      ::decode(use_page_set, p);
       uint32_t s;
       ::decode(s, p);
       while (s--) {
 	ghobject_t k;
 	::decode(k, p);
-	ObjectRef o(new Object);
+	auto o = create_object();
 	o->decode(p);
 	object_map.insert(make_pair(k, o));
 	object_hash.insert(make_pair(k, o));
@@ -123,9 +226,22 @@ public:
       DECODE_FINISH(p);
     }
 
-    Collection() : lock("MemStore::Collection::lock") {}
+    uint64_t used_bytes() const {
+      uint64_t result = 0;
+      for (map<ghobject_t, ObjectRef,ghobject_t::BitwiseComparator>::const_iterator p = object_map.begin();
+	   p != object_map.end();
+	   ++p) {
+        result += p->second->get_size();
+      }
+
+      return result;
+    }
+
+    Collection(CephContext *cct)
+      : cct(cct), use_page_set(cct->_conf->memstore_page_set),
+        lock("MemStore::Collection::lock") {}
   };
-  typedef ceph::shared_ptr<Collection> CollectionRef;
+  typedef Collection::Ref CollectionRef;
 
 private:
   class OmapIteratorImpl : public ObjectMap::ObjectMapIteratorImpl {
@@ -137,35 +253,35 @@ private:
       : c(c), o(o), it(o->omap.begin()) {}
 
     int seek_to_first() {
-      RWLock::RLocker l(c->lock);
+      std::lock_guard<std::mutex>(o->omap_mutex);
       it = o->omap.begin();
       return 0;
     }
     int upper_bound(const string &after) {
-      RWLock::RLocker l(c->lock);
+      std::lock_guard<std::mutex>(o->omap_mutex);
       it = o->omap.upper_bound(after);
       return 0;
     }
     int lower_bound(const string &to) {
-      RWLock::RLocker l(c->lock);
+      std::lock_guard<std::mutex>(o->omap_mutex);
       it = o->omap.lower_bound(to);
       return 0;
     }
     bool valid() {
-      RWLock::RLocker l(c->lock);
+      std::lock_guard<std::mutex>(o->omap_mutex);
       return it != o->omap.end();      
     }
-    int next() {
-      RWLock::RLocker l(c->lock);
+    int next(bool validate=true) {
+      std::lock_guard<std::mutex>(o->omap_mutex);
       ++it;
       return 0;
     }
     string key() {
-      RWLock::RLocker l(c->lock);
+      std::lock_guard<std::mutex>(o->omap_mutex);
       return it->first;
     }
     bufferlist value() {
-      RWLock::RLocker l(c->lock);
+      std::lock_guard<std::mutex>(o->omap_mutex);
       return it->second;
     }
     int status() {
@@ -182,13 +298,13 @@ private:
 
   Finisher finisher;
 
+  uint64_t used_bytes;
+
   void _do_transaction(Transaction& t);
 
-  void _write_into_bl(const bufferlist& src, unsigned offset, bufferlist *dst);
-
   int _touch(coll_t cid, const ghobject_t& oid);
-  int _write(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len, const bufferlist& bl,
-      bool replica = false);
+  int _write(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len,
+	      const bufferlist& bl, uint32_t fadvsie_flags = 0);
   int _zero(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len);
   int _truncate(coll_t cid, const ghobject_t& oid, uint64_t size);
   int _remove(coll_t cid, const ghobject_t& oid);
@@ -200,9 +316,8 @@ private:
 		   const ghobject_t& newoid,
 		   uint64_t srcoff, uint64_t len, uint64_t dstoff);
   int _omap_clear(coll_t cid, const ghobject_t &oid);
-  int _omap_setkeys(coll_t cid, const ghobject_t &oid,
-		    const map<string, bufferlist> &aset);
-  int _omap_rmkeys(coll_t cid, const ghobject_t &oid, const set<string> &keys);
+  int _omap_setkeys(coll_t cid, const ghobject_t &oid, bufferlist& aset_bl);
+  int _omap_rmkeys(coll_t cid, const ghobject_t &oid, bufferlist& keys_bl);
   int _omap_rmkeyrange(coll_t cid, const ghobject_t &oid,
 		       const string& first, const string& last);
   int _omap_setheader(coll_t cid, const ghobject_t &oid, const bufferlist &bl);
@@ -214,11 +329,6 @@ private:
   int _collection_add(coll_t cid, coll_t ocid, const ghobject_t& oid);
   int _collection_move_rename(coll_t oldcid, const ghobject_t& oldoid,
 			      coll_t cid, const ghobject_t& o);
-  int _collection_setattr(coll_t cid, const char *name, const void *value,
-			  size_t size);
-  int _collection_setattrs(coll_t cid, map<string,bufferptr> &aset);
-  int _collection_rmattr(coll_t cid, const char *name);
-  int _collection_rename(const coll_t &cid, const coll_t &ncid);
   int _split_collection(coll_t cid, uint32_t bits, uint32_t rem, coll_t dest);
 
   int _save();
@@ -230,19 +340,13 @@ private:
 public:
   MemStore(CephContext *cct, const string& path)
     : ObjectStore(path),
+      cct(cct),
       coll_lock("MemStore::coll_lock"),
       apply_lock("MemStore::apply_lock"),
-      finisher(cct) { }
+      finisher(cct),
+      used_bytes(0),
+      sharded(false) {}
   ~MemStore() { }
-
-  int update_version_stamp() {
-    return 0;
-  }
-  uint32_t get_target_version() {
-    return 1;
-  }
-
-  int peek_journal_fsid(uuid_d *fsid);
 
   bool test_mount_in_use() {
     return false;
@@ -262,11 +366,22 @@ public:
   int mkjournal() {
     return 0;
   }
+  bool wants_journal() {
+    return false;
+  }
+  bool allows_journal() {
+    return false;
+  }
+  bool needs_journal() {
+    return false;
+  }
 
+  bool sharded;
   void set_allow_sharded_objects() {
+    sharded = true;
   }
   bool get_allow_sharded_objects() {
-    return true;
+    return sharded;
   }
 
   int statfs(struct statfs *buf);
@@ -283,6 +398,7 @@ public:
     uint64_t offset,
     size_t len,
     bufferlist& bl,
+    uint32_t op_flags = 0,
     bool allow_eio = false);
   int fiemap(coll_t cid, const ghobject_t& oid, uint64_t offset, size_t len, bufferlist& bl);
   int getattr(coll_t cid, const ghobject_t& oid, const char *name, bufferptr& value);
@@ -290,17 +406,10 @@ public:
 
   int list_collections(vector<coll_t>& ls);
   bool collection_exists(coll_t c);
-  int collection_getattr(coll_t cid, const char *name,
-			 void *value, size_t size);
-  int collection_getattr(coll_t cid, const char *name, bufferlist& bl);
-  int collection_getattrs(coll_t cid, map<string,bufferptr> &aset);
   bool collection_empty(coll_t c);
-  int collection_list(coll_t cid, vector<ghobject_t>& o);
-  int collection_list_partial(coll_t cid, ghobject_t start,
-			      int min, int max, snapid_t snap, 
-			      vector<ghobject_t> *ls, ghobject_t *next);
-  int collection_list_range(coll_t cid, ghobject_t start, ghobject_t end,
-			    snapid_t seq, vector<ghobject_t> *ls);
+  int collection_list(coll_t cid, ghobject_t start, ghobject_t end,
+		      bool sort_bitwise, int max,
+		      vector<ghobject_t> *ls, ghobject_t *next);
 
   int omap_get(
     coll_t cid,                ///< [in] Collection containing oid

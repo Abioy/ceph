@@ -5,7 +5,7 @@
 #include <string>
 #include "include/memory.h"
 
-#include "os/KeyValueDB.h"
+#include "kv/KeyValueDB.h"
 #include "include/buffer.h"
 #include "include/Context.h"
 
@@ -19,7 +19,7 @@ public:
   KeyValueDBMemory(KeyValueDBMemory *db) : db(db->db) { }
   virtual ~KeyValueDBMemory() { }
 
-  virtual int init() {
+  virtual int init(string _opt) {
     return 0;
   }
   virtual int open(ostream &out) {

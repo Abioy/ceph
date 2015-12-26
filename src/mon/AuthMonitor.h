@@ -124,26 +124,40 @@ private:
     pending_auth.push_back(inc);
   }
 
+  /* validate mon caps ; don't care about caps for other services as
+   * we don't know how to validate them */
+  bool valid_caps(const vector<string>& caps, ostream *out) {
+    for (vector<string>::const_iterator p = caps.begin();
+         p != caps.end(); p += 2) {
+      if (!p->empty() && *p != "mon")
+        continue;
+      MonCap tmp;
+      if (!tmp.parse(*(p+1), out))
+        return false;
+    }
+    return true;
+  }
+
   void on_active();
   bool should_propose(double& delay);
   void create_initial();
   void update_from_paxos(bool *need_bootstrap);
   void create_pending();  // prepare a new pending
-  bool prepare_global_id(MMonGlobalID *m);
+  bool prepare_global_id(MonOpRequestRef op);
   void increase_max_global_id();
-  uint64_t assign_global_id(MAuth *m, bool should_increase_max);
+  uint64_t assign_global_id(MonOpRequestRef op, bool should_increase_max);
   // propose pending update to peers
   void encode_pending(MonitorDBStore::TransactionRef t);
   virtual void encode_full(MonitorDBStore::TransactionRef t);
   version_t get_trim_to();
 
-  bool preprocess_query(PaxosServiceMessage *m);  // true if processed.
-  bool prepare_update(PaxosServiceMessage *m);
+  bool preprocess_query(MonOpRequestRef op);  // true if processed.
+  bool prepare_update(MonOpRequestRef op);
 
-  bool prep_auth(MAuth *m, bool paxos_writable);
+  bool prep_auth(MonOpRequestRef op, bool paxos_writable);
 
-  bool preprocess_command(MMonCommand *m);
-  bool prepare_command(MMonCommand *m);
+  bool preprocess_command(MonOpRequestRef op);
+  bool prepare_command(MonOpRequestRef op);
 
   bool check_rotate();
  public:

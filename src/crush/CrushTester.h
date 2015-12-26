@@ -15,6 +15,7 @@ class CrushTester {
 
   map<int, int> device_weight;
   int min_rule, max_rule;
+  int ruleset;
   int min_x, max_x;
   int min_rep, max_rep;
 
@@ -27,6 +28,7 @@ class CrushTester {
   bool output_utilization;
   bool output_utilization_all;
   bool output_statistics;
+  bool output_mappings;
   bool output_bad_mappings;
   bool output_choose_tries;
 
@@ -167,6 +169,7 @@ public:
   CrushTester(CrushWrapper& c, ostream& eo)
     : crush(c), err(eo),
       min_rule(-1), max_rule(-1),
+      ruleset(-1),
       min_x(-1), max_x(-1),
       min_rep(-1), max_rep(-1),
       num_batches(1),
@@ -176,6 +179,7 @@ public:
       output_utilization(false),
       output_utilization_all(false),
       output_statistics(false),
+      output_mappings(false),
       output_bad_mappings(false),
       output_choose_tries(false),
       output_data_file(false),
@@ -224,6 +228,13 @@ public:
   }
   bool get_output_statistics() const {
     return output_statistics;
+  }
+
+  void set_output_mappings(bool b) {
+    output_mappings = b;
+  }
+  bool get_output_mappings() const {
+    return output_mappings;
   }
 
   void set_output_bad_mappings(bool b) {
@@ -324,7 +335,23 @@ public:
     min_rule = max_rule = rule;
   }
 
+  void set_ruleset(int rs) {
+    ruleset = rs;
+  }
+
+  /**
+   * check if any bucket/nodes is referencing an unknown name or type
+   * @param max_id rejects any non-bucket items with id less than this number,
+   *               pass 0 to disable this check
+   * @return false if an dangling name/type is referenced or an item id is too
+   *         large, true otherwise
+   */
+  bool check_name_maps(unsigned max_id = 0) const;
   int test();
+  int test_with_crushtool(const char *crushtool_cmd = "crushtool",
+			  int max_id = -1,
+			  int timeout = 0,
+			  int ruleset = -1);
 };
 
 #endif

@@ -113,7 +113,7 @@ public:
   bufferlist rollback;
   string type;
   metareqid_t reqid;
-  __s32 master;
+  mds_rank_t master;
   __u8 op;  // prepare, commit, abort
   __u8 origop; // link | rename
 
@@ -143,7 +143,7 @@ public:
   void dump(Formatter *f) const;
   static void generate_test_instances(list<ESlaveUpdate*>& ls);
 
-  void replay(MDS *mds);
+  void replay(MDSRank *mds);
 };
 
 #endif

@@ -14,7 +14,7 @@ class KeystoneToken;
 struct rgw_swift_auth_info {
   int status;
   string auth_groups;
-  string user;
+  rgw_user user;
   string display_name;
   long long ttl;
 
@@ -56,6 +56,7 @@ class RGWSwift {
   bool supports_keystone() {
     return !cct->_conf->rgw_keystone_url.empty();
   }
+  bool do_verify_swift_token(RGWRados *store, req_state *s);
 protected:
   int check_revoked();
 public:

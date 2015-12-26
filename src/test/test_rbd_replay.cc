@@ -17,11 +17,9 @@
 #include <stdint.h>
 #include <boost/foreach.hpp>
 #include <cstdarg>
-#include "rbd_replay/Deser.hpp"
 #include "rbd_replay/ImageNameMap.hpp"
 #include "rbd_replay/ios.hpp"
 #include "rbd_replay/rbd_loc.hpp"
-#include "rbd_replay/Ser.hpp"
 
 
 using namespace rbd_replay;
@@ -36,41 +34,6 @@ static void add_mapping(ImageNameMap *map, std::string mapping_string) {
     ASSERT_TRUE(false) << "Failed to parse mapping string '" << mapping_string << "'";
   }
   map->add_mapping(mapping);
-}
-
-TEST(RBDReplay, Ser) {
-  std::ostringstream oss;
-  rbd_replay::Ser ser(oss);
-  ser.write_uint32_t(0x01020304u);
-  ser.write_string("hello");
-  ser.write_bool(true);
-  ser.write_bool(false);
-  std::string s(oss.str());
-  const char* data = s.data();
-  size_t size = s.size();
-  ASSERT_EQ(15U, size);
-  const char expected_data[] = {1, 2, 3, 4, 0, 0, 0, 5, 'h', 'e', 'l', 'l', 'o', 1, 0};
-  for (size_t i = 0; i < size; i++) {
-    EXPECT_EQ(expected_data[i], data[i]);
-  }
-}
-
-TEST(RBDReplay, Deser) {
-  const char data[] = {1, 2, 3, 4, 0, 0, 0, 5, 'h', 'e', 'l', 'l', 'o', 1, 0};
-  const std::string s(data, sizeof(data));
-  std::istringstream iss(s);
-  rbd_replay::Deser deser(iss);
-  EXPECT_FALSE(deser.eof());
-  EXPECT_EQ(0x01020304u, deser.read_uint32_t());
-  EXPECT_FALSE(deser.eof());
-  EXPECT_EQ("hello", deser.read_string());
-  EXPECT_FALSE(deser.eof());
-  EXPECT_TRUE(deser.read_bool());
-  EXPECT_FALSE(deser.eof());
-  EXPECT_FALSE(deser.read_bool());
-  EXPECT_FALSE(deser.eof());
-  deser.read_uint8_t();
-  EXPECT_TRUE(deser.eof());
 }
 
 TEST(RBDReplay, ImageNameMap) {
@@ -169,57 +132,3 @@ TEST(RBDReplay, rbd_loc_parse) {
   EXPECT_FALSE(m.parse("a@b/c"));
 }
 
-static IO::ptr mkio(action_id_t ionum, ...) {
-  IO::ptr io(new StartThreadIO(ionum, ionum, 0));
-
-  va_list ap;
-  va_start(ap, ionum);
-  while (true) {
-    IO::ptr* dep = va_arg(ap, IO::ptr*);
-    if (!dep) {
-      break;
-    }
-    io->dependencies().insert(*dep);
-  }
-  va_end(ap);
-
-  return io;
-}
-
-TEST(RBDReplay, batch_unreachable_from) {
-  io_set_t deps;
-  io_set_t base;
-  io_set_t unreachable;
-  IO::ptr io1(mkio(1, NULL));
-  IO::ptr io2(mkio(2, &io1, NULL));
-  IO::ptr io3(mkio(3, &io2, NULL));
-  IO::ptr io4(mkio(4, &io1, NULL));
-  IO::ptr io5(mkio(5, &io2, &io4, NULL));
-  IO::ptr io6(mkio(6, &io3, &io5, NULL));
-  IO::ptr io7(mkio(7, &io4, NULL));
-  IO::ptr io8(mkio(8, &io5, &io7, NULL));
-  IO::ptr io9(mkio(9, &io6, &io8, NULL));
-  // 1 (deps) <-- 2 (deps) <-- 3 (deps)
-  // ^            ^            ^
-  // |            |            |
-  // 4 <--------- 5 (base) <-- 6 (deps)
-  // ^            ^            ^
-  // |            |            |
-  // 7 <--------- 8 <--------- 9
-  deps.insert(io1);
-  deps.insert(io2);
-  deps.insert(io3);
-  deps.insert(io6);
-  base.insert(io5);
-  // Anything in 'deps' which is not reachable from 'base' is added to 'unreachable'
-  batch_unreachable_from(deps, base, &unreachable);
-  EXPECT_EQ(0U, unreachable.count(io1));
-  EXPECT_EQ(0U, unreachable.count(io2));
-  EXPECT_EQ(1U, unreachable.count(io3));
-  EXPECT_EQ(0U, unreachable.count(io4));
-  EXPECT_EQ(0U, unreachable.count(io5));
-  EXPECT_EQ(1U, unreachable.count(io6));
-  EXPECT_EQ(0U, unreachable.count(io7));
-  EXPECT_EQ(0U, unreachable.count(io8));
-  EXPECT_EQ(0U, unreachable.count(io9));
-}

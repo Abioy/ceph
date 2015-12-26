@@ -50,7 +50,7 @@ enum {
 class Journaler;
 class JournalPointer;
 class LogEvent;
-class MDS;
+class MDSRank;
 class LogSegment;
 class ESubtreeMap;
 
@@ -64,7 +64,7 @@ using std::map;
 
 class MDLog {
 public:
-  MDS *mds;
+  MDSRank *mds;
 protected:
   int num_events; // in events
 
@@ -72,7 +72,10 @@ protected:
 
   bool capped;
 
-  bool stopping;
+  // Log position which is persistent *and* for which
+  // submit_entry wait_for_safe callbacks have already
+  // been called.
+  uint64_t safe_pos;
 
   inodeno_t ino;
   Journaler *journaler;
@@ -146,6 +149,13 @@ protected:
   } submit_thread;
   friend class SubmitThread;
 
+public:
+  const std::set<LogSegment*> &get_expiring_segments() const
+  {
+    return expiring_segments;
+  }
+protected:
+
   // -- subtreemaps --
   friend class ESubtreeMap;
   friend class MDCache;
@@ -169,23 +179,23 @@ public:
   // replay state
   map<inodeno_t, set<inodeno_t> >   pending_exports;
 
-
+  void set_write_iohint(unsigned iohint_flags);
 
 public:
-  MDLog(MDS *m) : mds(m),
-		  num_events(0), 
-		  unflushed(0),
-		  capped(false),
-		  stopping(false),
-		  journaler(0),
-		  logger(0),
-		  replay_thread(this),
-		  already_replayed(false),
-		  recovery_thread(this),
-		  event_seq(0), expiring_events(0), expired_events(0),
-		  submit_mutex("MDLog::submit_mutex"),
-		  submit_thread(this),
-		  cur_event(NULL) { }		  
+  MDLog(MDSRank *m) : mds(m),
+                      num_events(0), 
+                      unflushed(0),
+                      capped(false),
+                      safe_pos(0),
+                      journaler(0),
+                      logger(0),
+                      replay_thread(this),
+                      already_replayed(false),
+                      recovery_thread(this),
+                      event_seq(0), expiring_events(0), expired_events(0),
+                      submit_mutex("MDLog::submit_mutex"),
+                      submit_thread(this),
+                      cur_event(NULL) { }		  
   ~MDLog();
 
 
@@ -277,24 +287,22 @@ public:
   }
 
 private:
-  class C_MaybeExpiredSegment : public MDSInternalContext {
-    MDLog *mdlog;
-    LogSegment *ls;
-    int op_prio;
-  public:
-    C_MaybeExpiredSegment(MDLog *mdl, LogSegment *s, int p) : MDSInternalContext(mdl->mds), mdlog(mdl), ls(s), op_prio(p) {}
-    void finish(int res) {
-      mdlog->_maybe_expired(ls, op_prio);
-    }
-  };
-
   void try_expire(LogSegment *ls, int op_prio);
   void _maybe_expired(LogSegment *ls, int op_prio);
   void _expired(LogSegment *ls);
   void _trim_expired_segments();
 
+  friend class C_MaybeExpiredSegment;
+  friend class C_MDL_Flushed;
+
 public:
+  void trim_expired_segments();
   void trim(int max=-1);
+  int trim_all();
+  bool expiry_done() const
+  {
+    return expiring_segments.empty() && expired_segments.empty();
+  };
 
 private:
   void write_head(MDSInternalContextBase *onfinish);

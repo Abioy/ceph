@@ -12,8 +12,23 @@
  * 
  */
 
-#include <google/heap-profiler.h>
-#include <google/malloc_extension.h>
+#include "acconfig.h"
+
+// Use the newer gperftools header locations if available.
+// If not, fall back to the old (gperftools < 2.0) locations.
+
+#ifdef HAVE_GPERFTOOLS_HEAP_PROFILER_H
+  #include <gperftools/heap-profiler.h>
+#else
+  #include <google/heap-profiler.h>
+#endif
+
+#ifdef HAVE_GPERFTOOLS_MALLOC_EXTENSION_H
+  #include <gperftools/malloc_extension.h>
+#else
+  #include <google/malloc_extension.h>
+#endif
+
 #include "heap_profiler.h"
 #include "common/environment.h"
 #include "common/LogClient.h"
@@ -46,7 +61,11 @@ void ceph_heap_release_free_memory()
 
 bool ceph_heap_profiler_running()
 {
+#ifdef HAVE_LIBTCMALLOC
   return IsHeapProfilerRunning();
+#else
+  return false;
+#endif
 }
 
 static void get_profile_name(char *profile_name, int profile_name_len)
@@ -68,34 +87,43 @@ static void get_profile_name(char *profile_name, int profile_name_len)
 
 void ceph_heap_profiler_start()
 {
+#ifdef HAVE_LIBTCMALLOC
   char profile_name[PATH_MAX];
   get_profile_name(profile_name, sizeof(profile_name)); 
   generic_dout(0) << "turning on heap profiler with prefix "
 		  << profile_name << dendl;
   HeapProfilerStart(profile_name);
+#endif
 }
 
 void ceph_heap_profiler_stop()
 {
+#ifdef HAVE_LIBTCMALLOC
   HeapProfilerStop();
+#endif
 }
 
 void ceph_heap_profiler_dump(const char *reason)
 {
+#ifdef HAVE_LIBTCMALLOC
   HeapProfilerDump(reason);
+#endif
 }
+
+#define HEAP_PROFILER_STATS_SIZE 2048
 
 void ceph_heap_profiler_handle_command(const std::vector<std::string>& cmd,
                                        ostream& out)
 {
+#ifdef HAVE_LIBTCMALLOC
   if (cmd.size() == 1 && cmd[0] == "dump") {
     if (!ceph_heap_profiler_running()) {
       out << "heap profiler not running; can't dump";
       return;
     }
-    char *heap_stats = new char[1024];
-    ceph_heap_profiler_stats(heap_stats, 1024);
-    out << g_conf->name << "dumping heap profile now.\n"
+    char heap_stats[HEAP_PROFILER_STATS_SIZE];
+    ceph_heap_profiler_stats(heap_stats, sizeof(heap_stats));
+    out << g_conf->name << " dumping heap profile now.\n"
 	<< heap_stats;
     ceph_heap_profiler_dump("admin request");
   } else if (cmd.size() == 1 && cmd[0] == "start_profiler") {
@@ -107,10 +135,12 @@ void ceph_heap_profiler_handle_command(const std::vector<std::string>& cmd,
   } else if (cmd.size() == 1 && cmd[0] == "release") {
     ceph_heap_release_free_memory();
     out << g_conf->name << " releasing free RAM back to system.";
-  } else if (cmd.size() == 1 && cmd[0] == "stats") {
-    char *heap_stats = new char[1024];
-    ceph_heap_profiler_stats(heap_stats, 1024);
-    out << g_conf->name << "tcmalloc heap stats:"
+  } else
+#endif
+  if (cmd.size() == 1 && cmd[0] == "stats") {
+    char heap_stats[HEAP_PROFILER_STATS_SIZE];
+    ceph_heap_profiler_stats(heap_stats, sizeof(heap_stats));
+    out << g_conf->name << " tcmalloc heap stats:"
 	<< heap_stats;
   } else {
     out << "unknown command " << cmd;

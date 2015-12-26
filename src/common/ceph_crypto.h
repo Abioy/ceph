@@ -11,9 +11,9 @@
 #ifdef USE_CRYPTOPP
 # define CRYPTOPP_ENABLE_NAMESPACE_WEAK 1
 #include <string.h>
-# include <cryptopp/md5.h>
-# include <cryptopp/sha.h>
-# include <cryptopp/hmac.h>
+#include <cryptopp/md5.h>
+#include <cryptopp/sha.h>
+#include <cryptopp/hmac.h>
 
 // reinclude our assert to clobber the system one
 # include "include/assert.h"
@@ -38,7 +38,7 @@ namespace ceph {
     };
   }
 }
-#elif USE_NSS
+#elif defined(USE_NSS)
 // you *must* use CRYPTO_CXXFLAGS in Makefile.am for including this include
 # include <nss.h>
 # include <pk11pub.h>
@@ -78,9 +78,11 @@ namespace ceph {
 	assert(s == SECSuccess);
       }
       void Update (const byte *input, size_t length) {
-	SECStatus s;
-	s = PK11_DigestOp(ctx, input, length);
-	assert(s == SECSuccess);
+        if (length) {
+	  SECStatus s;
+	  s = PK11_DigestOp(ctx, input, length);
+	  assert(s == SECSuccess);
+        }
       }
       void Final (byte *digest) {
 	SECStatus s;

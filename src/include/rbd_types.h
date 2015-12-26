@@ -13,23 +13,19 @@
 #ifndef CEPH_RBD_TYPES_H
 #define CEPH_RBD_TYPES_H
 
-#if defined(__linux__)
-#include <linux/types.h>
-#elif defined(__FreeBSD__)
-#include <sys/types.h>
-#endif
-
 #include "rbd/features.h"
 
 /* New-style rbd image 'foo' consists of objects
  *   rbd_id.foo              - id of image
  *   rbd_header.<id>         - image metadata
+ *   rbd_object_map.<id>     - optional image object map
  *   rbd_data.<id>.00000000
  *   rbd_data.<id>.00000001
  *   ...                     - data
  */
 
 #define RBD_HEADER_PREFIX      "rbd_header."
+#define RBD_OBJECT_MAP_PREFIX  "rbd_object_map."
 #define RBD_DATA_PREFIX        "rbd_data."
 #define RBD_ID_PREFIX          "rbd_id."
 
@@ -61,6 +57,13 @@
  */
 #define RBD_CHILDREN		"rbd_children"
 #define RBD_LOCK_NAME		"rbd_lock"
+
+/**
+ * rbd_pool_settings object in each pool contains pool-specific settings
+ * for configuring features such as async image mirroring to other Ceph
+ * clusters.
+ */
+#define RBD_POOL_SETTINGS       "rbd_pool_settings"
 
 #define RBD_DEFAULT_OBJ_ORDER	22   /* 4MB */
 

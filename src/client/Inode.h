@@ -13,11 +13,16 @@
 #include "osdc/ObjectCacher.h"
 #include "include/assert.h"
 
+#include "InodeRef.h"
+
+class Client;
 struct MetaSession;
 class Dentry;
 class Dir;
 struct SnapRealm;
 struct Inode;
+class ceph_lock_state_t;
+class MetaRequest;
 
 struct Cap {
   MetaSession *session;
@@ -40,7 +45,7 @@ struct Cap {
 
 struct CapSnap {
   //snapid_t follows;  // map key
-  Inode *in;
+  InodeRef in;
   SnapContext context;
   int issued, dirty;
 
@@ -53,6 +58,9 @@ struct CapSnap {
   map<string,bufferptr> xattrs;
   version_t xattr_version;
 
+  bufferlist inline_data;
+  version_t inline_version;
+
   bool writing, dirty_data;
   uint64_t flush_tid;
   xlist<CapSnap*>::item flushing_item;
@@ -60,23 +68,99 @@ struct CapSnap {
   CapSnap(Inode *i)
     : in(i), issued(0), dirty(0),
       size(0), time_warp_seq(0), mode(0), uid(0), gid(0), xattr_version(0),
-      writing(false), dirty_data(false), flush_tid(0),
+      inline_version(0), writing(false), dirty_data(false), flush_tid(0),
       flushing_item(this)
   {}
 
   void dump(Formatter *f) const;
 };
 
+class QuotaTree {
+private:
+  Inode *_in;
+
+  int _ancestor_ref;
+  QuotaTree *_ancestor;
+  int _parent_ref;
+  QuotaTree *_parent;
+
+  void _put()
+  {
+    if (!_in && !_ancestor_ref && !_parent_ref) {
+      set_parent(NULL);
+      set_ancestor(NULL);
+      delete this;
+    }
+  }
+  ~QuotaTree() {}
+public:
+  QuotaTree(Inode *i) :
+    _in(i),
+    _ancestor_ref(0),
+    _ancestor(NULL),
+    _parent_ref(0),
+    _parent(NULL)
+  { assert(i); }
+
+  Inode *in() { return _in; }
+
+  int ancestor_ref() { return _ancestor_ref; }
+  int parent_ref() { return _parent_ref; }
+
+  QuotaTree *ancestor() { return _ancestor; }
+  void set_ancestor(QuotaTree *ancestor)
+  {
+    if (ancestor == _ancestor)
+      return;
+
+    if (_ancestor) {
+      --_ancestor->_ancestor_ref;
+      _ancestor->_put();
+    }
+    _ancestor = ancestor;
+    if (_ancestor)
+      ++_ancestor->_ancestor_ref;
+  }
+
+  QuotaTree *parent() { return _parent; }
+  void set_parent(QuotaTree *parent)
+  {
+    if (parent == _parent)
+      return;
+
+    if (_parent) {
+      --_parent->_parent_ref;
+      _parent->_put();
+    }
+    _parent = parent;
+    if (parent)
+      ++_parent->_parent_ref;
+  }
+
+  void invalidate()
+  {
+    if (!_in)
+      return;
+
+    _in = NULL;
+    set_ancestor(NULL);
+    set_parent(NULL);
+    _put();
+  }
+};
 
 // inode flags
 #define I_COMPLETE 1
+#define I_DIR_ORDERED 2
 
 struct Inode {
-  CephContext *cct;
+  Client *client;
 
   // -- the actual inode --
   inodeno_t ino;
   snapid_t  snapid;
+  ino_t faked_ino;
+
   uint32_t   rdev;    // if special file
 
   // affected by any inode change...
@@ -114,6 +198,7 @@ struct Inode {
   version_t  inline_version;
   bufferlist inline_data;
 
+  bool is_root()    const { return ino == MDS_INO_ROOT; }
   bool is_symlink() const { return (mode & S_IFMT) == S_IFLNK; }
   bool is_dir()     const { return (mode & S_IFMT) == S_IFDIR; }
   bool is_file()    const { return (mode & S_IFMT) == S_IFREG; }
@@ -134,25 +219,33 @@ struct Inode {
 
   unsigned flags;
 
+  quota_info_t quota;
+  QuotaTree* qtree;
+
+  bool is_complete_and_ordered() {
+    static const unsigned wants = I_COMPLETE | I_DIR_ORDERED;
+    return (flags & wants) == wants;
+  }
+
   // about the dir (if this is one!)
   set<int>  dir_contacts;
   bool      dir_hashed, dir_replicated;
 
   // per-mds caps
-  map<int,Cap*> caps;            // mds -> Cap
+  map<mds_rank_t, Cap*> caps;            // mds -> Cap
   Cap *auth_cap;
+  int64_t cap_dirtier_uid;
+  int64_t cap_dirtier_gid;
   unsigned dirty_caps, flushing_caps;
-  uint64_t flushing_cap_seq;
-  __u16 flushing_cap_tid[CEPH_CAP_BITS];
+  std::map<ceph_tid_t, int> flushing_cap_tids;
   int shared_gen, cache_gen;
   int snap_caps, snap_cap_refs;
   utime_t hold_caps_until;
   xlist<Inode*>::item cap_item, flushing_cap_item;
-  ceph_tid_t last_flush_tid;
 
   SnapRealm *snaprealm;
   xlist<Inode*>::item snaprealm_item;
-  Inode *snapdir_parent;  // only if we are a snapdir inode
+  InodeRef snapdir_parent;  // only if we are a snapdir inode
   map<snapid_t,CapSnap*> cap_snaps;   // pending flush to mds
 
   //int open_by_mode[CEPH_FILE_MODE_NUM];
@@ -183,19 +276,8 @@ struct Inode {
   void make_long_path(filepath& p);
   void make_nosnap_relative_path(filepath& p);
 
-  void get() {
-    _ref++;
-    lsubdout(cct, mds, 15) << "inode.get on " << this << " " <<  ino << '.' << snapid
-                           << " now " << _ref << dendl;
-  }
-  /// private method to put a reference; see Client::put_inode()
-  int _put(int n=1) {
-    _ref -= n; 
-    lsubdout(cct, mds, 15) << "inode.put on " << this << " " << ino << '.' << snapid
-                           << " now " << _ref << dendl;
-    assert(_ref >= 0);
-    return _ref;
-  }
+  void get();
+  int _put(int n=1);
 
   int get_num_ref() {
     return _ref;
@@ -209,26 +291,35 @@ struct Inode {
     ll_ref -= n;
   }
 
-  Inode(CephContext *cct_, vinodeno_t vino, ceph_file_layout *newlayout)
-    : cct(cct_), ino(vino.ino), snapid(vino.snapid),
+  // file locks
+  ceph_lock_state_t *fcntl_locks;
+  ceph_lock_state_t *flock_locks;
+
+  xlist<MetaRequest*> unsafe_dir_ops;
+
+  Inode(Client *c, vinodeno_t vino, ceph_file_layout *newlayout)
+    : client(c), ino(vino.ino), snapid(vino.snapid), faked_ino(0),
       rdev(0), mode(0), uid(0), gid(0), nlink(0),
       size(0), truncate_seq(1), truncate_size(-1),
       time_warp_seq(0), max_size(0), version(0), xattr_version(0),
       inline_version(0),
       flags(0),
+      qtree(NULL),
       dir_hashed(false), dir_replicated(false), auth_cap(NULL),
-      dirty_caps(0), flushing_caps(0), flushing_cap_seq(0), shared_gen(0), cache_gen(0),
+      cap_dirtier_uid(-1), cap_dirtier_gid(-1),
+      dirty_caps(0), flushing_caps(0), shared_gen(0), cache_gen(0),
       snap_caps(0), snap_cap_refs(0),
-      cap_item(this), flushing_cap_item(this), last_flush_tid(0),
-      snaprealm(0), snaprealm_item(this), snapdir_parent(0),
+      cap_item(this), flushing_cap_item(this),
+      snaprealm(0), snaprealm_item(this),
       oset((void *)this, newlayout->fl_pg_pool, ino),
       reported_size(0), wanted_max_size(0), requested_max_size(0),
-      _ref(0), ll_ref(0), 
-      dir(0), dn_set()
+      _ref(0), ll_ref(0), dir(0), dn_set(),
+      fcntl_locks(NULL), flock_locks(NULL),
+      async_err(0)
   {
     memset(&dir_layout, 0, sizeof(dir_layout));
     memset(&layout, 0, sizeof(layout));
-    memset(&flushing_cap_tid, 0, sizeof(__u16)*CEPH_CAP_BITS);
+    memset(&quota, 0, sizeof(quota));
   }
   ~Inode() { }
 
@@ -255,7 +346,7 @@ struct Inode {
   bool cap_is_valid(Cap* cap);
   int caps_issued(int *implemented = 0);
   void touch_cap(Cap *cap);
-  void try_touch_cap(int mds);
+  void try_touch_cap(mds_rank_t mds);
   bool caps_issued_mask(unsigned mask);
   int caps_used();
   int caps_file_wanted();
@@ -264,6 +355,9 @@ struct Inode {
 
   bool have_valid_size();
   Dir *open_dir();
+
+  // Record errors to be exposed in fclose/fflush
+  int async_err;
 
   void dump(Formatter *f) const;
 };

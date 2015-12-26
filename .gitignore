@@ -52,7 +52,9 @@ missing
 py-compile
 release
 stamp-h1
+systemd/Makefile
 vgcore.*
+test-suite.log
 
 # specific local dir files
 /build-doc
@@ -64,7 +66,7 @@ vgcore.*
 /ceph-[0-9]*/
 
 # M4 Macro directory
-m4/
+/m4/
 
 # where is this from?
 web/*.html
@@ -82,3 +84,6 @@ GTAGS
 /examples/librados/.libs/
 /examples/librados/librados_hello_world
 /examples/librados/librados_hello_world_c
+
+# common cmake build dir
+/build

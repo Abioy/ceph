@@ -268,7 +268,7 @@ bool KeyServer::generate_secret(CryptoKey& secret)
   if (crypto->create(bp) < 0)
     return false;
 
-  secret.set_secret(cct, CEPH_CRYPTO_AES, bp);
+  secret.set_secret(CEPH_CRYPTO_AES, bp, ceph_clock_now(NULL));
 
   return true;
 }
@@ -312,11 +312,15 @@ int KeyServer::encode_secrets(Formatter *f, stringstream *ds) const
     if (ds) {
       *ds << name.to_str() << std::endl;
       *ds << "\tkey: " << mapiter->second.key << std::endl;
+      if (mapiter->second.auid != CEPH_AUTH_UID_DEFAULT)
+	*ds << "\tauid: " << mapiter->second.auid << std::endl;
     }
     if (f) {
       f->open_object_section("auth_entities");
       f->dump_string("entity", name.to_str());
       f->dump_stream("key") << mapiter->second.key;
+      if (mapiter->second.auid != CEPH_AUTH_UID_DEFAULT)
+	f->dump_int("auid", mapiter->second.auid);
       f->open_object_section("caps");
     }
 

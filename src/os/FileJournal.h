@@ -50,13 +50,13 @@ public:
   struct write_item {
     uint64_t seq;
     bufferlist bl;
-    int alignment;
+    uint32_t orig_len;
     TrackedOpRef tracked_op;
-    write_item(uint64_t s, bufferlist& b, int al, TrackedOpRef opref) :
-      seq(s), alignment(al), tracked_op(opref) {
-      bl.claim(b);
+    write_item(uint64_t s, bufferlist& b, int ol, TrackedOpRef opref) :
+      seq(s), orig_len(ol), tracked_op(opref) {
+      bl.claim(b, buffer::list::CLAIM_ALLOW_NONSHAREABLE); // potential zero-copy
     }
-    write_item() : seq(0), alignment(0) {}
+    write_item() : seq(0), orig_len(0) {}
   };
 
   Mutex finisher_lock;
@@ -66,16 +66,26 @@ public:
 
   Mutex writeq_lock;
   Cond writeq_cond;
-  deque<write_item> writeq;
+  list<write_item> writeq;
   bool writeq_empty();
   write_item &peek_write();
   void pop_write();
+  void batch_pop_write(list<write_item> &items);
+  void batch_unpop_write(list<write_item> &items);
 
   Mutex completions_lock;
-  deque<completion_item> completions;
+  list<completion_item> completions;
   bool completions_empty() {
     Mutex::Locker l(completions_lock);
     return completions.empty();
+  }
+  void batch_pop_completions(list<completion_item> &items) {
+    Mutex::Locker l(completions_lock);
+    completions.swap(items);
+  }
+  void batch_unpop_completions(list<completion_item> &items) {
+    Mutex::Locker l(completions_lock);
+    completions.splice(completions.begin(), items);
   }
   completion_item completion_peek_front() {
     Mutex::Locker l(completions_lock);
@@ -88,7 +98,9 @@ public:
     completions.pop_front();
   }
 
-  void submit_entry(uint64_t seq, bufferlist& bl, int alignment,
+  int prepare_entry(list<ObjectStore::Transaction*>& tls, bufferlist* tbl);
+
+  void submit_entry(uint64_t seq, bufferlist& bl, uint32_t orig_len,
 		    Context *oncommit,
 		    TrackedOpRef osd_op = TrackedOpRef());
   /// End protected by finisher_lock
@@ -134,8 +146,8 @@ public:
       start = block_size;
     }
 
-    uint64_t get_fsid64() {
-      return *(uint64_t*)&fsid.uuid[0];
+    uint64_t get_fsid64() const {
+      return *(uint64_t*)fsid.bytes();
     }
 
     void encode(bufferlist& bl) const {
@@ -163,8 +175,8 @@ public:
 	flags = 0;
 	uint64_t tfsid;
 	::decode(tfsid, bl);
-	*(uint64_t*)&fsid.uuid[0] = tfsid;
-	*(uint64_t*)&fsid.uuid[8] = tfsid;
+	*(uint64_t*)&fsid.bytes()[0] = tfsid;
+	*(uint64_t*)&fsid.bytes()[8] = tfsid;
 	::decode(block_size, bl);
 	::decode(alignment, bl);
 	::decode(max_size, bl);
@@ -203,28 +215,29 @@ public:
     uint64_t magic1;
     uint64_t magic2;
     
-    void make_magic(off64_t pos, uint64_t fsid) {
-      magic1 = pos;
-      magic2 = fsid ^ seq ^ len;
+    static uint64_t make_magic(uint64_t seq, uint32_t len, uint64_t fsid) {
+      return (fsid ^ seq ^ len);
     }
     bool check_magic(off64_t pos, uint64_t fsid) {
       return
-	magic1 == (uint64_t)pos &&
-	magic2 == (fsid ^ seq ^ len);
+    magic1 == (uint64_t)pos &&
+    magic2 == (fsid ^ seq ^ len);
     }
   } __attribute__((__packed__, aligned(4)));
+
+  bool journalq_empty() { return journalq.empty(); }
 
 private:
   string fn;
 
   char *zero_buf;
-
   off64_t max_size;
   size_t block_size;
   bool directio, aio, force_aio;
   bool must_write_header;
   off64_t write_pos;      // byte where the next entry to be written will go
-  off64_t read_pos;       // 
+  off64_t read_pos;       //
+  bool discard;	  //for block journal whether support discard
 
 #ifdef HAVE_LIBAIO
   /// state associated with an in-flight aio request
@@ -287,15 +300,18 @@ private:
   // write thread
   Mutex write_lock;
   bool write_stop;
+  bool aio_stop;
 
   Cond commit_cond;
 
   int _open(bool wr, bool create=false);
   int _open_block_device();
+  void _close(int fd) const;
   void _check_disk_write_cache() const;
   int _open_file(int64_t oldsize, blksize_t blksize, bool create);
-  void print_header();
-  int read_header();
+  int _dump(ostream& out, bool simple);
+  void print_header(const header_t &hdr) const;
+  int read_header(header_t *hdr) const;
   bufferptr prepare_header();
   void start_writer();
   void stop_writer();
@@ -305,7 +321,8 @@ private:
 
   int check_for_full(uint64_t seq, off64_t pos, off64_t size);
   int prepare_multi_write(bufferlist& bl, uint64_t& orig_ops, uint64_t& orig_bytee);
-  int prepare_single_write(bufferlist& bl, off64_t& queue_pos, uint64_t& orig_ops, uint64_t& orig_bytes);
+  int prepare_single_write(write_item &next_write, bufferlist& bl, off64_t& queue_pos,
+    uint64_t& orig_ops, uint64_t& orig_bytes);
   void do_write(bufferlist& bl);
 
   void write_finish_thread_entry();
@@ -323,7 +340,9 @@ private:
     int64_t len,      ///< [in] length to read
     bufferlist* bl,   ///< [out] result
     off64_t *out_pos  ///< [out] next position to read, will be wrapped
-    );
+    ) const;
+
+  void do_discard(int64_t offset, int64_t end);
 
   class Writer : public Thread {
     FileJournal *journal;
@@ -345,7 +364,7 @@ private:
     }
   } write_finish_thread;
 
-  off64_t get_top() {
+  off64_t get_top() const {
     return ROUND_UP_TO(sizeof(header), block_size);
   }
 
@@ -364,6 +383,7 @@ private:
     directio(dio), aio(ai), force_aio(faio),
     must_write_header(false),
     write_pos(0), read_pos(0),
+    discard(false),
 #ifdef HAVE_LIBAIO
     aio_lock("FileJournal::aio_lock"),
     aio_ctx(0),
@@ -374,13 +394,27 @@ private:
     full_state(FULL_NOTFULL),
     fd(-1),
     writing_seq(0),
-    throttle_ops(g_ceph_context, "filestore_ops"),
-    throttle_bytes(g_ceph_context, "filestore_bytes"),
+    throttle_ops(g_ceph_context, "journal_ops", g_conf->journal_queue_max_ops),
+    throttle_bytes(g_ceph_context, "journal_bytes", g_conf->journal_queue_max_bytes),
     write_lock("FileJournal::write_lock", false, true, false, g_ceph_context),
-    write_stop(false),
+    write_stop(true),
+    aio_stop(true),
     write_thread(this),
-    write_finish_thread(this) { }
+    write_finish_thread(this) {
+
+      if (aio && !directio) {
+        derr << "FileJournal::_open_any: aio not supported without directio; disabling aio" << dendl;
+        aio = false;
+      }
+#ifndef HAVE_LIBAIO
+      if (aio) {
+        derr << "FileJournal::_open_any: libaio not compiled in; disabling aio" << dendl;
+        aio = false;
+      }
+#endif
+  }
   ~FileJournal() {
+    assert(fd == -1);
     delete[] zero_buf;
   }
 
@@ -391,6 +425,8 @@ private:
   int peek_fsid(uuid_d& fsid);
 
   int dump(ostream& out);
+  int simple_dump(ostream& out);
+  int _fdump(Formatter &f, bool simple);
 
   void flush();
 
@@ -405,8 +441,10 @@ private:
   void commit_start(uint64_t seq);
   void committed_thru(uint64_t seq);
   bool should_commit_now() {
-    return full_state != FULL_NOTFULL;
+    return full_state != FULL_NOTFULL && !write_stop;
   }
+
+  void write_header_sync();
 
   void set_wait_on_full(bool b) { wait_on_full = b; }
 
@@ -440,7 +478,7 @@ private:
     uint64_t *seq,        ///< [out] seq of successful read
     ostream *ss,          ///< [out] error output
     entry_header_t *h = 0 ///< [out] header
-    ); ///< @return result code
+    ) const; ///< @return result code
 
   bool read_entry(
     bufferlist &bl,

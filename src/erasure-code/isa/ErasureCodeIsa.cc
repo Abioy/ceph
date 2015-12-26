@@ -41,6 +41,9 @@ _prefix(std::ostream* _dout)
 }
 // -----------------------------------------------------------------------------
 
+const std::string ErasureCodeIsaDefault::DEFAULT_K("7");
+const std::string ErasureCodeIsaDefault::DEFAULT_M("3");
+
 int
 ErasureCodeIsa::create_ruleset(const string &name,
                                CrushWrapper &crush,
@@ -55,27 +58,30 @@ ErasureCodeIsa::create_ruleset(const string &name,
 
   if (ruleid < 0)
     return ruleid;
-  else
+  else {
+    crush.set_rule_mask_max_size(ruleid, get_chunk_count());
     return crush.get_rule_mask_ruleset(ruleid);
+  }
 }
 
 // -----------------------------------------------------------------------------
 
-void
-ErasureCodeIsa::init(const map<string, string> &parameters)
+int
+ErasureCodeIsa::init(ErasureCodeProfile &profile, ostream *ss)
 {
-  dout(10) << "technique=" << technique << dendl;
-  map<string, string>::const_iterator parameter;
-  parameter = parameters.find("ruleset-root");
-  if (parameter != parameters.end())
-    ruleset_root = parameter->second;
-  parameter = parameters.find("ruleset-failure-domain");
-  if (parameter != parameters.end())
-    ruleset_failure_domain = parameter->second;
-  ostringstream ss;
-  if (parse(parameters, &ss))
-    derr << ss.str() << dendl;
+  int err = 0;
+  err |= to_string("ruleset-root", profile,
+		   &ruleset_root,
+		   DEFAULT_RULESET_ROOT, ss);
+  err |= to_string("ruleset-failure-domain", profile,
+		   &ruleset_failure_domain,
+		   DEFAULT_RULESET_FAILURE_DOMAIN, ss);
+  err |= parse(profile, ss);
+  if (err)
+    return err;
   prepare();
+  ErasureCode::init(profile, ss);
+  return err;
 }
 
 // -----------------------------------------------------------------------------
@@ -84,10 +90,16 @@ unsigned int
 ErasureCodeIsa::get_chunk_size(unsigned int object_size) const
 {
   unsigned alignment = get_alignment();
-  unsigned tail = object_size % alignment;
-  unsigned padded_length = object_size + (tail ? (alignment - tail) : 0);
-  assert(padded_length % k == 0);
-  return padded_length / k;
+  unsigned chunk_size = ( object_size + k - 1 ) / k;
+  dout(20) << "get_chunk_size: chunk_size " << chunk_size
+           << " must be modulo " << alignment << dendl;
+  unsigned modulo = chunk_size % alignment;
+  if (modulo) {
+    dout(10) << "get_chunk_size: " << chunk_size
+             << " padded to " << chunk_size + alignment - modulo << dendl;
+    chunk_size += alignment - modulo;
+  }
+  return chunk_size;
 }
 
 // -----------------------------------------------------------------------------
@@ -167,7 +179,7 @@ ErasureCodeIsaDefault::isa_decode(int *erasures,
                                   int blocksize)
 {
   int nerrs = 0;
-  int i, j, r, s;
+  int i, r, s;
 
   // count the errors
   for (int l = 0; erasures[l] != -1; l++) {
@@ -227,8 +239,6 @@ ErasureCodeIsaDefault::isa_decode(int *erasures,
     return 0;
   }
 
-  unsigned char b[k * (m + k)];
-  unsigned char c[k * (m + k)];
   unsigned char d[k * (m + k)];
   unsigned char decode_tbls[k * (m + k)*32];
   unsigned char *p_tbls = decode_tbls;
@@ -265,6 +275,10 @@ ErasureCodeIsaDefault::isa_decode(int *erasures,
   // Try to get an already computed matrix
   // ---------------------------------------------
   if (!tcache.getDecodingTableFromCache(erasure_signature, p_tbls, matrixtype, k, m)) {
+    int j;
+    unsigned char b[k * (m + k)];
+    unsigned char c[k * (m + k)];
+
     for (i = 0; i < k; i++) {
       r = decode_index[i];
       for (j = 0; j < k; j++)
@@ -294,10 +308,9 @@ ErasureCodeIsaDefault::isa_decode(int *erasures,
           c[k * p + j] = d[k * erasures[p] + j];
         }
       } else {
-        int s = 0;
         // decoding matrix element for coding chunks
         for (i = 0; i < k; i++) {
-          s = 0;
+          int s = 0;
           for (j = 0; j < k; j++)
             s ^= gf_mul(d[j * k + i],
                         encode_coeff[k * erasures[p] + j]);
@@ -326,18 +339,18 @@ ErasureCodeIsaDefault::isa_decode(int *erasures,
 unsigned
 ErasureCodeIsaDefault::get_alignment() const
 {
-  return k * EC_ISA_VECTOR_OP_WORDSIZE;
+  return EC_ISA_ADDRESS_ALIGNMENT;
 }
 
 // -----------------------------------------------------------------------------
 
-int ErasureCodeIsaDefault::parse(const map<std::string,
-                                 std::string> &parameters,
+int ErasureCodeIsaDefault::parse(ErasureCodeProfile &profile,
                                  ostream *ss)
 {
-  int err = ErasureCode::parse(parameters, ss);
-  err |= to_int("k", parameters, &k, DEFAULT_K, ss);
-  err |= to_int("m", parameters, &m, DEFAULT_M, ss);
+  int err = ErasureCode::parse(profile, ss);
+  err |= to_int("k", profile, &k, DEFAULT_K, ss);
+  err |= to_int("m", profile, &m, DEFAULT_M, ss);
+  err |= sanity_check_k(k, ss);
 
   if (matrixtype == kVandermonde) {
     // these are verified safe values evaluated using the

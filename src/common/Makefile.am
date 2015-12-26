@@ -1,4 +1,4 @@
-libcommon_la_SOURCES = \
+libcommon_internal_la_SOURCES = \
 	ceph_ver.c \
 	common/DecayCounter.cc \
 	common/LogClient.cc \
@@ -14,6 +14,7 @@ libcommon_la_SOURCES = \
 	common/cmdparse.cc \
 	common/escape.c \
 	common/io_priority.cc \
+	common/ceph_time.cc \
 	common/Clock.cc \
 	common/Throttle.cc \
 	common/Timer.cc \
@@ -26,19 +27,16 @@ libcommon_la_SOURCES = \
 	common/MemoryModel.cc \
 	common/armor.c \
 	common/fd.cc \
-	common/xattr.c \
 	common/safe_io.c \
 	common/snap_types.cc \
 	common/str_list.cc \
 	common/str_map.cc \
 	common/errno.cc \
 	common/RefCountedObj.cc \
-	common/blkdev.cc \
 	common/common_init.cc \
 	common/pipe.c \
 	common/ceph_argparse.cc \
 	common/ceph_context.cc \
-	common/buffer.cc \
 	common/types.cc \
 	common/code_environment.cc \
 	common/dout.cc \
@@ -59,10 +57,6 @@ libcommon_la_SOURCES = \
 	common/entity_name.cc \
 	common/ceph_crypto.cc \
 	common/ceph_crypto_cms.cc \
-	common/ceph_json.cc \
-	common/ipaddr.cc \
-	common/pick_address.cc \
-	common/util.cc \
 	common/TextTable.cc \
 	common/ceph_fs.cc \
 	common/ceph_hash.cc \
@@ -71,11 +65,52 @@ libcommon_la_SOURCES = \
 	common/addr_parsing.c \
 	common/hobject.cc \
 	common/bloom_filter.cc \
-	common/linux_version.c \
-	common/module.c
+	common/module.c \
+	common/Readahead.cc \
+	common/Cycles.cc \
+	common/ContextCompletion.cc \
+	common/TracepointProvider.cc \
+	common/PluginRegistry.cc
 
-# these should go out of libcommon
-libcommon_la_SOURCES += \
+common/PluginRegistry.cc: ./ceph_ver.h
+
+if ENABLE_SERVER
+libcommon_internal_la_SOURCES += \
+	common/xattr.c \
+	common/ipaddr.cc \
+	common/ceph_json.cc \
+	common/util.cc \
+	common/pick_address.cc
+endif
+
+if LINUX
+libcommon_internal_la_SOURCES += \
+	common/linux_version.c 
+endif
+
+if SOLARIS
+libcommon_internal_la_SOURCES += \
+        common/solaris_errno.cc
+endif
+
+if AIX
+libcommon_internal_la_SOURCES += \
+        common/aix_errno.cc
+endif
+
+# used by RBD and FileStore
+if LINUX
+libcommon_internal_la_SOURCES += \
+	common/blkdev.cc
+endif
+
+if ENABLE_XIO
+libcommon_internal_la_SOURCES += \
+	common/address_helper.cc
+endif
+
+# these should go out of libcommon_internal
+libcommon_internal_la_SOURCES += \
 	mon/MonCap.cc \
 	mon/MonClient.cc \
 	mon/MonMap.cc \
@@ -85,7 +120,10 @@ libcommon_la_SOURCES += \
 	osd/HitSet.cc \
 	mds/MDSMap.cc \
 	mds/inode_backtrace.cc \
-	mds/mdstypes.cc 
+	mds/mdstypes.cc \
+	mds/flock.cc
+LIBCOMMON_DEPS += libcommon_internal.la
+noinst_LTLIBRARIES += libcommon_internal.la
 
 # inject crc in common
 libcommon_crc_la_SOURCES = \
@@ -101,24 +139,35 @@ endif
 LIBCOMMON_DEPS += libcommon_crc.la
 noinst_LTLIBRARIES += libcommon_crc.la
 
+if HAVE_ARMV8_CRC
+libcommon_crc_aarch64_la_SOURCES = common/crc32c_aarch64.c
+libcommon_crc_aarch64_la_CFLAGS = $(AM_CFLAGS) $(ARM_CRC_FLAGS)
+LIBCOMMON_DEPS += libcommon_crc_aarch64.la
+noinst_LTLIBRARIES += libcommon_crc_aarch64.la
+endif
+
 noinst_HEADERS += \
 	common/bloom_filter.hpp \
 	common/sctp_crc32.h \
 	common/crc32c_intel_baseline.h \
-	common/crc32c_intel_fast.h
+	common/crc32c_intel_fast.h \
+	common/crc32c_aarch64.h
 
 
 # important; libmsg before libauth!
 LIBCOMMON_DEPS += \
 	$(LIBERASURE_CODE) \
 	$(LIBMSG) $(LIBAUTH) \
-	$(LIBCRUSH) $(LIBJSON_SPIRIT) $(LIBLOG) $(LIBARCH)
+	$(LIBCRUSH) $(LIBJSON_SPIRIT) $(LIBLOG) $(LIBARCH) \
+	$(BOOST_RANDOM_LIBS)
 
 if LINUX
-LIBCOMMON_DEPS += -lrt
+LIBCOMMON_DEPS += -lrt -lblkid
 endif # LINUX
 
+libcommon_la_SOURCES = common/buffer.cc
 libcommon_la_LIBADD = $(LIBCOMMON_DEPS)
+noinst_LTLIBRARIES += libcommon.la
 
 noinst_HEADERS += \
 	common/BackTrace.h \
@@ -167,6 +216,7 @@ noinst_HEADERS += \
 	common/map_cacher.hpp \
 	common/MemoryModel.h \
 	common/Mutex.h \
+	common/QueueRing.h \
 	common/PrebufferedStreambuf.h \
 	common/RWLock.h \
 	common/Semaphore.h \
@@ -203,9 +253,25 @@ noinst_HEADERS += \
 	common/cmdparse.h \
 	common/hobject.h \
 	common/linux_version.h \
-	common/module.h
+	common/module.h \
+	common/Continuation.h \
+	common/Readahead.h \
+	common/Cycles.h \
+	common/Initialize.h \
+	common/ContextCompletion.h \
+	common/bit_vector.hpp \
+	common/SubProcess.h \
+	common/valgrind.h \
+	common/TracepointProvider.h \
+	common/event_socket.h \
+	common/PluginRegistry.h \
+	common/ceph_time.h \
+	common/ceph_timer.h
 
-noinst_LTLIBRARIES += libcommon.la
+if ENABLE_XIO
+noinst_HEADERS += \
+	common/address_helper.h
+endif
 
 
 libsecret_la_SOURCES = common/secret.c

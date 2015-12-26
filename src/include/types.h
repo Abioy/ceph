@@ -62,7 +62,6 @@ extern "C" {
 using namespace std;
 
 #include "include/unordered_map.h"
-#include "include/hash_namespace.h"
 
 #include "object.h"
 #include "intarith.h"
@@ -83,6 +82,11 @@ typedef long long off64_t;
 typedef off_t loff_t;
 typedef off_t off64_t;
 #endif
+
+#if defined(__sun) || defined(_AIX)
+typedef off_t loff_t;
+#endif
+
 
 // -- io helpers --
 
@@ -112,6 +116,12 @@ inline ostream& operator<<(ostream& out, const deque<A>& v) {
   return out;
 }
 
+template<class A, class B, class C>
+inline ostream& operator<<(ostream&out, const boost::tuple<A, B, C> &t) {
+  out << boost::get<0>(t) <<"," << boost::get<1>(t) << "," << boost::get<2>(t);
+  return out;
+}
+
 template<class A>
 inline ostream& operator<<(ostream& out, const list<A>& ilist) {
   for (typename list<A>::const_iterator it = ilist.begin();
@@ -126,6 +136,17 @@ inline ostream& operator<<(ostream& out, const list<A>& ilist) {
 template<class A>
 inline ostream& operator<<(ostream& out, const set<A>& iset) {
   for (typename set<A>::const_iterator it = iset.begin();
+       it != iset.end();
+       ++it) {
+    if (it != iset.begin()) out << ",";
+    out << *it;
+  }
+  return out;
+}
+
+template<class A, class C>
+inline ostream& operator<<(ostream& out, const set<A, C>& iset) {
+  for (typename set<A, C>::const_iterator it = iset.begin();
        it != iset.end();
        ++it) {
     if (it != iset.begin()) out << ",";
@@ -150,6 +171,20 @@ inline ostream& operator<<(ostream& out, const map<A,B>& m)
 {
   out << "{";
   for (typename map<A,B>::const_iterator it = m.begin();
+       it != m.end();
+       ++it) {
+    if (it != m.begin()) out << ",";
+    out << it->first << "=" << it->second;
+  }
+  out << "}";
+  return out;
+}
+
+template<class A,class B, class C>
+inline ostream& operator<<(ostream& out, const map<A,B,C>& m)
+{
+  out << "{";
+  for (typename map<A,B,C>::const_iterator it = m.begin();
        it != m.end();
        ++it) {
     if (it != m.begin()) out << ",";
@@ -297,7 +332,7 @@ inline ostream& operator<<(ostream& out, inodeno_t ino) {
   return out << hex << ino.val << dec;
 }
 
-CEPH_HASH_NAMESPACE_START
+namespace std {
   template<> struct hash< inodeno_t >
   {
     size_t operator()( const inodeno_t& x ) const
@@ -306,7 +341,7 @@ CEPH_HASH_NAMESPACE_START
       return H(x.val);
     }
   };
-CEPH_HASH_NAMESPACE_END
+} // namespace std
 
 
 // file modes
@@ -446,13 +481,30 @@ inline ostream& operator<<(ostream &oss, health_status_t status) {
 }
 #endif
 
+struct weightf_t {
+  float v;
+  weightf_t(float _v) : v(_v) {}
+};
+
+inline ostream& operator<<(ostream& out, const weightf_t& w)
+{
+  if (w.v < -0.01) {
+    return out << "-";
+  } else if (w.v < 0.000001) {
+    return out << "0";
+  } else {
+    std::streamsize p = out.precision();
+    return out << std::fixed << std::setprecision(5) << w.v << std::setprecision(p);
+  }
+}
+
 struct shard_id_t {
-  uint8_t id;
+  int8_t id;
 
   shard_id_t() : id(0) {}
-  explicit shard_id_t(uint8_t _id) : id(_id) {}
+  explicit shard_id_t(int8_t _id) : id(_id) {}
 
-  operator uint8_t() const { return id; }
+  operator int8_t() const { return id; }
 
   const static shard_id_t NO_SHARD;
 
@@ -467,5 +519,35 @@ WRITE_CLASS_ENCODER(shard_id_t)
 WRITE_EQ_OPERATORS_1(shard_id_t, id)
 WRITE_CMP_OPERATORS_1(shard_id_t, id)
 ostream &operator<<(ostream &lhs, const shard_id_t &rhs);
+
+#if defined(__sun) || defined(_AIX)
+__s32  ceph_to_host_errno(__s32 e);
+#else
+#define  ceph_to_host_errno(e) (e)
+#endif
+
+struct errorcode32_t {
+  int32_t code;
+
+  errorcode32_t() {}
+  errorcode32_t(int32_t i) : code(i) {}
+
+  operator int() const { return code; }
+  int operator==(int i) {
+    return code==i;
+  }
+
+  void encode(bufferlist &bl) const {
+    ::encode(code, bl);
+  }
+  void decode(bufferlist::iterator &bl) {
+    ::decode(code, bl);
+    code = ceph_to_host_errno(code);
+  }
+};
+WRITE_CLASS_ENCODER(errorcode32_t)
+WRITE_EQ_OPERATORS_1(errorcode32_t, code)
+WRITE_CMP_OPERATORS_1(errorcode32_t, code)
+
 
 #endif

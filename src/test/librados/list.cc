@@ -1,4 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
+// vim: ts=8 sw=2 smarttab
 #include "include/rados/librados.h"
 #include "include/rados/librados.hpp"
 #include "include/stringify.h"
@@ -6,16 +7,18 @@
 #include "test/librados/TestCase.h"
 
 #include "include/types.h"
+#include "common/hobject.h"
 #include "gtest/gtest.h"
 #include <errno.h>
 #include <string>
+#include <stdexcept>
 
 using namespace librados;
 
-typedef RadosTest LibRadosList;
-typedef RadosTestPP LibRadosListPP;
-typedef RadosTestEC LibRadosListEC;
-typedef RadosTestECPP LibRadosListECPP;
+typedef RadosTestNS LibRadosList;
+typedef RadosTestPPNS LibRadosListPP;
+typedef RadosTestECNS LibRadosListEC;
+typedef RadosTestECPPNS LibRadosListECPP;
 
 TEST_F(LibRadosList, ListObjects) {
   char buf[128];
@@ -32,6 +35,11 @@ TEST_F(LibRadosList, ListObjects) {
   ASSERT_TRUE(foundit);
   rados_objects_list_close(ctx);
 }
+
+
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 TEST_F(LibRadosListPP, ListObjectsPP) {
   char buf[128];
@@ -149,6 +157,9 @@ static void check_list(std::set<std::string>& myset, rados_list_ctx_t& ctx)
   ASSERT_TRUE(myset.empty());
 }
 
+#pragma GCC diagnostic pop
+#pragma GCC diagnostic warning "-Wpragmas"
+
 TEST_F(LibRadosList, ListObjectsNS) {
   char buf[128];
   memset(buf, 0xcc, sizeof(buf));
@@ -195,7 +206,15 @@ TEST_F(LibRadosList, ListObjectsNS) {
   ASSERT_EQ(0, rados_objects_list_open(ioctx, &ctx));
   check_list(ns2, ctx);
   rados_objects_list_close(ctx);
+
+  // Can't specify all namespaces using old interface
+  rados_ioctx_set_namespace(ioctx, LIBRADOS_ALL_NSPACES);
+  ASSERT_EQ(-EINVAL, rados_objects_list_open(ioctx, &ctx));
 }
+
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 static void check_listpp(std::set<std::string>& myset, IoCtx& ioctx)
 {
@@ -253,6 +272,9 @@ TEST_F(LibRadosListPP, ListObjectsPPNS) {
 
   ioctx.set_namespace("ns2");
   check_listpp(ns2, ioctx);
+
+  ioctx.set_namespace(all_nspaces);
+  EXPECT_THROW(check_listpp(def, ioctx), std::runtime_error);
 }
 
 TEST_F(LibRadosListPP, ListObjectsManyPP) {
@@ -457,6 +479,9 @@ TEST_F(LibRadosListECPP, ListObjectsEndIter) {
   ASSERT_TRUE(iter2 == iter_end2);
 }
 
+#pragma GCC diagnostic pop
+#pragma GCC diagnostic warning "-Wpragmas"
+
 TEST_F(LibRadosListEC, ListObjectsNS) {
   char buf[128];
   memset(buf, 0xcc, sizeof(buf));
@@ -503,6 +528,10 @@ TEST_F(LibRadosListEC, ListObjectsNS) {
   ASSERT_EQ(0, rados_objects_list_open(ioctx, &ctx));
   check_list(ns2, ctx);
   rados_objects_list_close(ctx);
+
+  // Can't specify all namespaces using old interface
+  rados_ioctx_set_namespace(ioctx, LIBRADOS_ALL_NSPACES);
+  ASSERT_EQ(-EINVAL, rados_objects_list_open(ioctx, &ctx));
 }
 
 TEST_F(LibRadosListECPP, ListObjectsPPNS) {
@@ -543,7 +572,14 @@ TEST_F(LibRadosListECPP, ListObjectsPPNS) {
 
   ioctx.set_namespace("ns2");
   check_listpp(ns2, ioctx);
+
+  ioctx.set_namespace(all_nspaces);
+  EXPECT_THROW(check_listpp(def, ioctx), std::runtime_error);
 }
+
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 TEST_F(LibRadosListECPP, ListObjectsManyPP) {
   char buf[128];
@@ -631,3 +667,221 @@ TEST_F(LibRadosListECPP, ListObjectsStartPP) {
     ++p;
   }
 }
+
+
+TEST_F(LibRadosList, EnumerateObjects) {
+  char buf[128];
+  memset(buf, 0xcc, sizeof(buf));
+
+  const uint32_t n_objects = 16;
+  for (unsigned i=0; i<n_objects; ++i) {
+    ASSERT_EQ(0, rados_write(ioctx, stringify(i).c_str(), buf, sizeof(buf), 0));
+  }
+
+  // Ensure a non-power-of-two PG count to avoid only
+  // touching the easy path.
+  std::string err_str = set_pg_num(&s_cluster, pool_name, 11);
+  ASSERT_TRUE(err_str.empty());
+
+  std::set<std::string> saw_obj;
+  rados_object_list_cursor c = rados_object_list_begin(ioctx);
+  rados_object_list_cursor end = rados_object_list_end(ioctx);
+  while(!rados_object_list_is_end(ioctx, c))
+  {
+    rados_object_list_item results[12];
+    memset(results, 0, sizeof(rados_object_list_item) * 12);
+    int r = rados_object_list(ioctx,
+            c, rados_object_list_end(ioctx),
+            12, results, &c);
+    ASSERT_GE(r, 0);
+    for (int i = 0; i < r; ++i) {
+      std::string oid(results[i].oid, results[i].oid_length);
+      if (saw_obj.count(oid)) {
+          std::cerr << "duplicate obj " << oid << std::endl;
+      }
+      ASSERT_FALSE(saw_obj.count(oid));
+      saw_obj.insert(oid);
+    }
+    rados_object_list_free(12, results);
+  }
+  rados_object_list_cursor_free(ioctx, c);
+  rados_object_list_cursor_free(ioctx, end);
+
+  for (unsigned i=0; i<n_objects; ++i) {
+    if (!saw_obj.count(stringify(i))) {
+        std::cerr << "missing object " << i << std::endl;
+    }
+    ASSERT_TRUE(saw_obj.count(stringify(i)));
+  }
+  ASSERT_EQ(n_objects, saw_obj.size());
+}
+
+TEST_F(LibRadosList, EnumerateObjectsSplit) {
+  char buf[128];
+  memset(buf, 0xcc, sizeof(buf));
+
+  const uint32_t n_objects = 16;
+  for (unsigned i=0; i<n_objects; ++i) {
+    ASSERT_EQ(0, rados_write(ioctx, stringify(i).c_str(), buf, sizeof(buf), 0));
+  }
+
+  // Ensure a non-power-of-two PG count to avoid only
+  // touching the easy path.
+  std::string err_str = set_pg_num(&s_cluster, pool_name, 11);
+  ASSERT_TRUE(err_str.empty());
+
+  rados_object_list_cursor begin = rados_object_list_begin(ioctx);
+  rados_object_list_cursor end = rados_object_list_end(ioctx);
+
+  // Step through an odd number of shards
+  unsigned m = 5;
+  std::set<std::string> saw_obj;
+  for (unsigned n = 0; n < m; ++n) {
+      rados_object_list_cursor shard_start = rados_object_list_begin(ioctx);;
+      rados_object_list_cursor shard_end = rados_object_list_end(ioctx);;
+
+      rados_object_list_slice(
+        ioctx,
+        begin,
+        end,
+        n,
+        m,
+        &shard_start,
+        &shard_end);
+      std::cout << "split " << n << "/" << m << " -> "
+		<< *(hobject_t*)shard_start << " "
+		<< *(hobject_t*)shard_end << std::endl;
+
+      rados_object_list_cursor c = shard_start;
+      //while(c < shard_end)
+      while(rados_object_list_cursor_cmp(ioctx, c, shard_end) == -1)
+      {
+        rados_object_list_item results[12];
+        memset(results, 0, sizeof(rados_object_list_item) * 12);
+        int r = rados_object_list(ioctx,
+                c, shard_end,
+                12, results, &c);
+        ASSERT_GE(r, 0);
+        for (int i = 0; i < r; ++i) {
+          std::string oid(results[i].oid, results[i].oid_length);
+          if (saw_obj.count(oid)) {
+              std::cerr << "duplicate obj " << oid << std::endl;
+          }
+          ASSERT_FALSE(saw_obj.count(oid));
+          saw_obj.insert(oid);
+        }
+        rados_object_list_free(12, results);
+      }
+      rados_object_list_cursor_free(ioctx, shard_start);
+      rados_object_list_cursor_free(ioctx, shard_end);
+  }
+
+  rados_object_list_cursor_free(ioctx, begin);
+  rados_object_list_cursor_free(ioctx, end);
+
+  for (unsigned i=0; i<n_objects; ++i) {
+    if (!saw_obj.count(stringify(i))) {
+        std::cerr << "missing object " << i << std::endl;
+    }
+    ASSERT_TRUE(saw_obj.count(stringify(i)));
+  }
+  ASSERT_EQ(n_objects, saw_obj.size());
+}
+
+TEST_F(LibRadosListPP, EnumerateObjectsPP) {
+  char buf[128];
+  memset(buf, 0xcc, sizeof(buf));
+  bufferlist bl;
+  bl.append(buf, sizeof(buf));
+
+  const uint32_t n_objects = 16;
+  for (unsigned i=0; i<n_objects; ++i) {
+    ASSERT_EQ(0, ioctx.write(stringify(i), bl, sizeof(buf), 0));
+  }
+
+  std::set<std::string> saw_obj;
+  ObjectCursor c = ioctx.object_list_begin();
+  ObjectCursor end = ioctx.object_list_end();
+  while(!ioctx.object_list_is_end(c))
+  {
+    std::vector<ObjectItem> result;
+    int r = ioctx.object_list(c, end, 12, &result, &c);
+    ASSERT_GE(r, 0);
+    ASSERT_EQ(r, result.size());
+    for (int i = 0; i < r; ++i) {
+      auto oid = result[i].oid;
+      if (saw_obj.count(oid)) {
+          std::cerr << "duplicate obj " << oid << std::endl;
+      }
+      ASSERT_FALSE(saw_obj.count(oid));
+      saw_obj.insert(oid);
+    }
+  }
+
+  for (unsigned i=0; i<n_objects; ++i) {
+    if (!saw_obj.count(stringify(i))) {
+        std::cerr << "missing object " << i << std::endl;
+    }
+    ASSERT_TRUE(saw_obj.count(stringify(i)));
+  }
+  ASSERT_EQ(n_objects, saw_obj.size());
+}
+
+TEST_F(LibRadosListPP, EnumerateObjectsSplitPP) {
+  char buf[128];
+  memset(buf, 0xcc, sizeof(buf));
+  bufferlist bl;
+  bl.append(buf, sizeof(buf));
+
+  const uint32_t n_objects = 16;
+  for (unsigned i=0; i<n_objects; ++i) {
+    ASSERT_EQ(0, ioctx.write(stringify(i), bl, sizeof(buf), 0));
+  }
+
+  ObjectCursor begin = ioctx.object_list_begin();
+  ObjectCursor end = ioctx.object_list_end();
+
+  // Step through an odd number of shards
+  unsigned m = 5;
+  std::set<std::string> saw_obj;
+  for (unsigned n = 0; n < m; ++n) {
+      ObjectCursor shard_start;
+      ObjectCursor shard_end;
+
+      ioctx.object_list_slice(
+        begin,
+        end,
+        n,
+        m,
+        &shard_start,
+        &shard_end);
+
+      ObjectCursor c(shard_start);
+      while(c < shard_end)
+      {
+        std::vector<ObjectItem> result;
+        int r = ioctx.object_list(c, shard_end, 12, &result, &c);
+        ASSERT_GE(r, 0);
+
+        for (const auto & i : result) {
+          const auto &oid = i.oid;
+          if (saw_obj.count(oid)) {
+              std::cerr << "duplicate obj " << oid << std::endl;
+          }
+          ASSERT_FALSE(saw_obj.count(oid));
+          saw_obj.insert(oid);
+        }
+      }
+  }
+
+  for (unsigned i=0; i<n_objects; ++i) {
+    if (!saw_obj.count(stringify(i))) {
+        std::cerr << "missing object " << i << std::endl;
+    }
+    ASSERT_TRUE(saw_obj.count(stringify(i)));
+  }
+  ASSERT_EQ(n_objects, saw_obj.size());
+}
+
+#pragma GCC diagnostic pop
+#pragma GCC diagnostic warning "-Wpragmas"

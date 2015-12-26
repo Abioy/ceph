@@ -1,3 +1,4 @@
+if ENABLE_CLIENT
 libclient_la_SOURCES = \
 	client/Client.cc \
 	client/Inode.cc \
@@ -15,6 +16,7 @@ noinst_HEADERS += \
 	client/Dir.h \
 	client/Fh.h \
 	client/Inode.h \
+	client/InodeRef.h \
 	client/MetaRequest.h \
 	client/MetaSession.h \
 	client/ClientSnapRealm.h \
@@ -25,7 +27,8 @@ noinst_HEADERS += \
 
 if WITH_FUSE
 libclient_fuse_la_SOURCES = client/fuse_ll.cc
-libclient_fuse_la_LIBADD = libclient.la -lfuse
+libclient_fuse_la_LIBADD = libclient.la $(LIBFUSE_LIBS)
+libclient_fuse_la_CXXFLAGS = $(AM_CXXFLAGS) $(LIBFUSE_CFLAGS)
 noinst_LTLIBRARIES += libclient_fuse.la
 noinst_HEADERS += client/fuse_ll.h
 endif
@@ -33,3 +36,4 @@ endif
 ceph_test_ioctls_SOURCES = client/test_ioctls.c
 bin_DEBUGPROGRAMS += ceph_test_ioctls
 
+endif # ENABLE_CLIENT

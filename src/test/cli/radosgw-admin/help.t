@@ -24,6 +24,7 @@
     bucket check               check bucket index
     object rm                  remove object
     object unlink              unlink object from bucket index
+    objects expire             run expired objects cleanup
     quota set                  set quota params
     quota enable               enable quota
     quota disable              disable quota
@@ -56,7 +57,8 @@
     metadata rm                remove metadata info
     metadata list              list metadata info
     mdlog list                 list metadata log
-    mdlog trim                 trim metadata log
+    mdlog trim                 trim metadata log (use start-date, end-date or
+                               start-marker, end-marker)
     bilog list                 list bucket index log
     bilog trim                 trim bucket index log (use start-marker, end-marker)
     datalog list               list data log
@@ -67,13 +69,15 @@
     opstate renew              renew state on an entry (use client_id, op_id, object)
     opstate rm                 remove entry (use client_id, op_id, object)
     replicalog get             get replica metadata log entry
+    replicalog update          update replica metadata log entry
     replicalog delete          delete replica metadata log entry
   options:
      --uid=<id>                user id
      --subuser=<name>          subuser name
      --access-key=<key>        S3 access key
      --email=<email>
-     --secret=<key>            specify secret key
+     --secret/--secret-key=<key>
+                               specify secret key
      --gen-access-key          generate random access key (for S3)
      --gen-secret              generate random secret key
      --key-type=<type>         key type, options are: swift, s3
@@ -81,6 +85,7 @@
      --access=<access>         Set access permissions for sub-user, should be one
                                of read, write, readwrite, full
      --display-name=<name>
+     --max_buckets             max number of buckets for a user
      --system                  set the system flag on the user
      --bucket=<bucket>
      --pool=<pool>
@@ -121,7 +126,7 @@
      --categories=<list>       comma separated list of categories, used in usage show
      --caps=<caps>             list of caps (e.g., "usage=read, write; user=read"
      --yes-i-really-mean-it    required for certain operations
-  
+     --reset-regions           reset regionmap when regionmap update
   <date> := "YYYY-MM-DD[ hh:mm:ss]"
   
   Quota options:
@@ -134,6 +139,9 @@
     --id/-i ID        set ID portion of my name
     --name/-n TYPE.ID set name
     --cluster NAME    set cluster name (default: ceph)
+    --setuser USER    set uid to user or uid (and gid to user's gid)
+    --setgroup GROUP  set gid to group or gid
     --version         show version and quit
   
   [1]
+ 

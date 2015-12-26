@@ -29,6 +29,7 @@ namespace librbd {
   using librados::IoCtx;
 
   class Image;
+  class ImageOptions;
   typedef void *image_ctx_t;
   typedef void *completion_t;
   typedef void (*callback_t)(completion_t cb, void *arg);
@@ -45,16 +46,22 @@ namespace librbd {
     std::string address;
   } locker_t;
 
+  typedef struct {
+    std::string cluster_uuid;
+    std::string cluster_name;
+    std::string client_name;
+  } mirror_peer_t;
+
   typedef rbd_image_info_t image_info_t;
 
-  class ProgressContext
+  class CEPH_RBD_API ProgressContext
   {
   public:
     virtual ~ProgressContext();
     virtual int update_progress(uint64_t offset, uint64_t total) = 0;
   };
 
-class RBD
+class CEPH_RBD_API RBD
 {
 public:
   RBD();
@@ -69,6 +76,7 @@ public:
     bool is_complete();
     int wait_for_complete();
     ssize_t get_return_value();
+    void *get_arg();
     void release();
   };
 
@@ -86,15 +94,32 @@ public:
   int create3(IoCtx& io_ctx, const char *name, uint64_t size,
 	      uint64_t features, int *order,
 	      uint64_t stripe_unit, uint64_t stripe_count);
+  int create4(IoCtx& io_ctx, const char *name, uint64_t size,
+	      ImageOptions& opts);
   int clone(IoCtx& p_ioctx, const char *p_name, const char *p_snapname,
 	       IoCtx& c_ioctx, const char *c_name, uint64_t features,
 	       int *c_order);
   int clone2(IoCtx& p_ioctx, const char *p_name, const char *p_snapname,
 	     IoCtx& c_ioctx, const char *c_name, uint64_t features,
 	     int *c_order, uint64_t stripe_unit, int stripe_count);
+  int clone3(IoCtx& p_ioctx, const char *p_name, const char *p_snapname,
+	     IoCtx& c_ioctx, const char *c_name, ImageOptions& opts);
   int remove(IoCtx& io_ctx, const char *name);
   int remove_with_progress(IoCtx& io_ctx, const char *name, ProgressContext& pctx);
   int rename(IoCtx& src_io_ctx, const char *srcname, const char *destname);
+
+  // RBD pool mirroring support functions
+  int mirror_is_enabled(IoCtx& io_ctx, bool *enabled);
+  int mirror_set_enabled(IoCtx& io_ctx, bool enabled);
+  int mirror_peer_add(IoCtx& io_ctx, const std::string &cluster_uuid,
+                      const std::string &cluster_name,
+                      const std::string &client_name);
+  int mirror_peer_remove(IoCtx& io_ctx, const std::string &cluster_uuid);
+  int mirror_peer_list(IoCtx& io_ctx, std::vector<mirror_peer_t> *peers);
+  int mirror_peer_set_client(IoCtx& io_ctx, const std::string &cluster_uuid,
+                             const std::string &client_name);
+  int mirror_peer_set_cluster(IoCtx& io_ctx, const std::string &cluster_uuid,
+                              const std::string &cluster_name);
 
 private:
   /* We don't allow assignment or copying */
@@ -102,11 +127,34 @@ private:
   const RBD& operator=(const RBD& rhs);
 };
 
-class Image
+class CEPH_RBD_API ImageOptions {
+public:
+  ImageOptions();
+  ImageOptions(rbd_image_options_t opts);
+  ~ImageOptions();
+
+  int set(int optname, const std::string& optval);
+  int set(int optname, uint64_t optval);
+  int get(int optname, std::string* optval) const;
+  int get(int optname, uint64_t* optval) const;
+  int unset(int optname);
+  void clear();
+  bool empty() const;
+
+private:
+  friend class RBD;
+  friend class Image;
+
+  rbd_image_options_t opts;
+};
+
+class CEPH_RBD_API Image
 {
 public:
   Image();
   ~Image();
+
+  int close();
 
   int resize(uint64_t size);
   int resize_with_progress(uint64_t size, ProgressContext& pctx);
@@ -116,12 +164,25 @@ public:
   int old_format(uint8_t *old);
   int size(uint64_t *size);
   int features(uint64_t *features);
+  int update_features(uint64_t features, bool enabled);
   int overlap(uint64_t *overlap);
+  int get_flags(uint64_t *flags);
+  int set_image_notification(int fd, int type);
+
+  /* exclusive lock feature */
+  int is_exclusive_lock_owner(bool *is_owner);
+
+  /* object map feature */
+  int rebuild_object_map(ProgressContext &prog_ctx);
+
   int copy(IoCtx& dest_io_ctx, const char *destname);
   int copy2(Image& dest);
+  int copy3(IoCtx& dest_io_ctx, const char *destname, ImageOptions& opts);
   int copy_with_progress(IoCtx& dest_io_ctx, const char *destname,
 			 ProgressContext &prog_ctx);
   int copy_with_progress2(Image& dest, ProgressContext &prog_ctx);
+  int copy_with_progress3(IoCtx& dest_io_ctx, const char *destname,
+			  ImageOptions& opts, ProgressContext &prog_ctx);
 
   /* striping */
   uint64_t get_stripe_unit() const;
@@ -145,7 +206,9 @@ public:
 
   /* snapshots */
   int snap_list(std::vector<snap_info_t>& snaps);
-  bool snap_exists(const char *snapname);
+  /* DEPRECATED; use snap_exists2 */
+  bool snap_exists(const char *snapname) __attribute__ ((deprecated));
+  int snap_exists2(const char *snapname, bool *exists);
   int snap_create(const char *snapname);
   int snap_remove(const char *snapname);
   int snap_rollback(const char *snap_name);
@@ -154,9 +217,12 @@ public:
   int snap_unprotect(const char *snap_name);
   int snap_is_protected(const char *snap_name, bool *is_protected);
   int snap_set(const char *snap_name);
+  int snap_rename(const char *srcname, const char *dstname);
 
   /* I/O */
   ssize_t read(uint64_t ofs, size_t len, ceph::bufferlist& bl);
+  /* @parmam op_flags see librados.h constants beginning with LIBRADOS_OP_FLAG */
+  ssize_t read2(uint64_t ofs, size_t len, ceph::bufferlist& bl, int op_flags);
   int64_t read_iterate(uint64_t ofs, size_t len,
 		       int (*cb)(uint64_t, size_t, const char *, void *), void *arg);
   int read_iterate2(uint64_t ofs, uint64_t len,
@@ -176,6 +242,8 @@ public:
    * @param fromsnapname start snapshot name, or NULL
    * @param ofs start offset
    * @param len len in bytes of region to report on
+   * @param include_parent true if full history diff should include parent
+   * @param whole_object 1 if diff extents should cover whole object
    * @param cb callback to call for each allocated region
    * @param arg argument to pass to the callback
    * @returns 0 on success, or negative error code on error
@@ -183,11 +251,20 @@ public:
   int diff_iterate(const char *fromsnapname,
 		   uint64_t ofs, uint64_t len,
 		   int (*cb)(uint64_t, size_t, int, void *), void *arg);
+  int diff_iterate2(const char *fromsnapname,
+		    uint64_t ofs, uint64_t len,
+                    bool include_parent, bool whole_object,
+		    int (*cb)(uint64_t, size_t, int, void *), void *arg);
+
   ssize_t write(uint64_t ofs, size_t len, ceph::bufferlist& bl);
+  /* @parmam op_flags see librados.h constants beginning with LIBRADOS_OP_FLAG */
+  ssize_t write2(uint64_t ofs, size_t len, ceph::bufferlist& bl, int op_flags);
   int discard(uint64_t ofs, uint64_t len);
 
   int aio_write(uint64_t off, size_t len, ceph::bufferlist& bl, RBD::AioCompletion *c);
-
+  /* @parmam op_flags see librados.h constants beginning with LIBRADOS_OP_FLAG */
+  int aio_write2(uint64_t off, size_t len, ceph::bufferlist& bl,
+		  RBD::AioCompletion *c, int op_flags);
   /**
    * read async from image
    *
@@ -206,6 +283,9 @@ public:
    * @param c aio completion to notify when read is complete
    */
   int aio_read(uint64_t off, size_t len, ceph::bufferlist& bl, RBD::AioCompletion *c);
+  /* @parmam op_flags see librados.h constants beginning with LIBRADOS_OP_FLAG */
+  int aio_read2(uint64_t off, size_t len, ceph::bufferlist& bl,
+		  RBD::AioCompletion *c, int op_flags);
   int aio_discard(uint64_t off, uint64_t len, RBD::AioCompletion *c);
 
   int flush();
@@ -220,12 +300,21 @@ public:
   int aio_flush(RBD::AioCompletion *c);
 
   /**
-   * Drop any cached data for an image
+   * Drop any cached data for this image
    *
-   * @param image the image to invalidate cached data for
    * @returns 0 on success, negative error code on failure
    */
   int invalidate_cache();
+
+  int poll_io_events(RBD::AioCompletion **comps, int numcomp);
+
+  int metadata_get(const std::string &key, std::string *value);
+  int metadata_set(const std::string &key, const std::string &value);
+  int metadata_remove(const std::string &key);
+  /**
+   * Returns a pair of key/value for this image
+   */
+  int metadata_list(const std::string &start, uint64_t max, std::map<std::string, ceph::bufferlist> *pairs);
 
 private:
   friend class RBD;

@@ -93,14 +93,15 @@ class PassAlong : public ThreadPool::WorkQueue<unsigned> {
     q.pop_front();
     return val;
   }
+  using ThreadPool::WorkQueue<unsigned>::_process;
   void _process(unsigned *item) {
     next->queue(item);
   }
   void _clear() { q.clear(); }
   bool _empty() { return q.empty(); }
 public:
-  PassAlong(ThreadPool *tp, Queueable *next) :
-    ThreadPool::WorkQueue<unsigned>("TestQueue", 100, 100, tp), next(next) {}
+  PassAlong(ThreadPool *tp, Queueable *_next) :
+    ThreadPool::WorkQueue<unsigned>("TestQueue", 100, 100, tp), next(_next) {}
 };
 
 int main(int argc, char **argv)
@@ -118,17 +119,23 @@ int main(int argc, char **argv)
      "layer desc")
     ;
 
+  vector<string> ceph_option_strings;
   po::variables_map vm;
-  po::parsed_options parsed =
-    po::command_line_parser(argc, argv).options(desc).allow_unregistered().run();
-  po::store(
-    parsed,
-    vm);
-  po::notify(vm);
+  try {
+    po::parsed_options parsed =
+      po::command_line_parser(argc, argv).options(desc).allow_unregistered().run();
+    po::store(
+	      parsed,
+	      vm);
+    po::notify(vm);
 
+    ceph_option_strings = po::collect_unrecognized(parsed.options,
+						   po::include_positional);
+  } catch(po::error &e) {
+    std::cerr << e.what() << std::endl;
+    return 1;
+  }
   vector<const char *> ceph_options, def_args;
-  vector<string> ceph_option_strings = po::collect_unrecognized(
-    parsed.options, po::include_positional);
   ceph_options.reserve(ceph_option_strings.size());
   for (vector<string>::iterator i = ceph_option_strings.begin();
        i != ceph_option_strings.end();

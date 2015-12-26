@@ -18,12 +18,11 @@
 
 
 using namespace librados;
-using ceph::buffer;
 using std::map;
 using std::ostringstream;
 using std::string;
 
-static sem_t sem;
+static sem_t *sem;
 static atomic_t stop_flag;
 
 class WatchNotifyTestCtx : public WatchCtx
@@ -31,9 +30,13 @@ class WatchNotifyTestCtx : public WatchCtx
 public:
     void notify(uint8_t opcode, uint64_t ver, bufferlist& bl)
     {
-      sem_post(&sem);
+      sem_post(sem);
     }
 };
+
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 struct WatcherUnwatcher : public Thread {
   string pool;
@@ -48,9 +51,10 @@ struct WatcherUnwatcher : public Thread {
 
       uint64_t handle;
       WatchNotifyTestCtx watch_ctx;
-      ioctx.watch("foo", 0, &handle, &watch_ctx);
+      int r = ioctx.watch("foo", 0, &handle, &watch_ctx);
       bufferlist bl;
-      ioctx.unwatch("foo", handle);
+      if (r == 0)
+	ioctx.unwatch("foo", handle);
       ioctx.close();
     }
     return NULL;
@@ -63,7 +67,7 @@ INSTANTIATE_TEST_CASE_P(WatchStressTests, WatchStress,
 			::testing::Values("", "cache"));
 
 TEST_P(WatchStress, Stress1) {
-  ASSERT_EQ(0, sem_init(&sem, 0, 0));
+  ASSERT_NE(SEM_FAILED, (sem = sem_open("test_stress_watch", O_CREAT, 0644, 0)));
   Rados ncluster;
   std::string pool_name = get_temp_pool_name();
   ASSERT_EQ("", create_one_pool_pp(pool_name, ncluster));
@@ -100,7 +104,7 @@ TEST_P(WatchStress, Stress1) {
       sleep(1); // Give a change to see an incorrect notify
     } else {
       TestAlarm alarm;
-      sem_wait(&sem);
+      sem_wait(sem);
     }
 
     if (do_blacklist) {
@@ -114,5 +118,8 @@ TEST_P(WatchStress, Stress1) {
   thr->join();
   nioctx.close();
   ASSERT_EQ(0, destroy_one_pool_pp(pool_name, ncluster));
-  sem_destroy(&sem);
+  sem_close(sem);
 }
+
+#pragma GCC diagnostic pop
+#pragma GCC diagnostic warning "-Wpragmas"

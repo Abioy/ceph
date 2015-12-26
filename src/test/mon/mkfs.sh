@@ -1,6 +1,7 @@
 #!/bin/bash
 #
 # Copyright (C) 2013 Cloudwatt <libre.licensing@cloudwatt.com>
+# Copyright (C) 2014 Red Hat <contact@redhat.com>
 #
 # Author: Loic Dachary <loic@dachary.org>
 #
@@ -15,15 +16,14 @@
 # GNU Library Public License for more details.
 #
 set -xe
-PS4='${FUNCNAME[0]}: $LINENO: '
+PS4='${BASH_SOURCE[0]}:$LINENO: ${FUNCNAME[0]}:  '
 
 DIR=mkfs
 export CEPH_CONF=/dev/null
 unset CEPH_ARGS
 MON_ID=a
 MON_DIR=$DIR/$MON_ID
-PORT=7451
-MONA=127.0.0.1:$PORT
+CEPH_MON=127.0.0.1:7110 # git grep '\<7110\>' : there must be only one
 TIMEOUT=360
 
 function setup() {
@@ -42,11 +42,11 @@ function mon_mkfs() {
     ./ceph-mon \
         --id $MON_ID \
         --fsid $fsid \
-        --osd-pool-default-erasure-code-directory=.libs \
+        --erasure-code-dir=.libs \
         --mkfs \
         --mon-data=$MON_DIR \
         --mon-initial-members=$MON_ID \
-        --mon-host=$MONA \
+        --mon-host=$CEPH_MON \
         "$@"
 }
 
@@ -54,13 +54,15 @@ function mon_run() {
     ./ceph-mon \
         --id $MON_ID \
         --chdir= \
-        --osd-pool-default-erasure-code-directory=.libs \
+        --mon-osd-full-ratio=.99 \
+        --mon-data-avail-crit=1 \
+        --erasure-code-dir=.libs \
         --mon-data=$MON_DIR \
         --log-file=$MON_DIR/log \
         --mon-cluster-log-file=$MON_DIR/log \
         --run-dir=$MON_DIR \
         --pid-file=$MON_DIR/pidfile \
-        --public-addr $MONA \
+        --public-addr $CEPH_MON \
         "$@"
 }
 
@@ -79,7 +81,9 @@ function auth_none() {
 
     ./ceph-mon \
         --id $MON_ID \
-        --osd-pool-default-erasure-code-directory=.libs \
+        --mon-osd-full-ratio=.99 \
+        --mon-data-avail-crit=1 \
+        --erasure-code-dir=.libs \
         --mon-data=$MON_DIR \
         --extract-monmap $MON_DIR/monmap
 
@@ -89,7 +93,7 @@ function auth_none() {
 
     mon_run --auth-supported=none
     
-    timeout $TIMEOUT ./ceph --mon-host $MONA mon stat || return 1
+    timeout $TIMEOUT ./ceph --mon-host $CEPH_MON mon stat || return 1
 }
 
 function auth_cephx_keyring() {
@@ -108,10 +112,15 @@ EOF
     timeout $TIMEOUT ./ceph \
         --name mon. \
         --keyring $MON_DIR/keyring \
-        --mon-host $MONA mon stat || return 1
+        --mon-host $CEPH_MON mon stat || return 1
 }
 
 function auth_cephx_key() {
+    if [ -f /etc/ceph/keyring ] ; then
+	echo "Please move /etc/ceph/keyring away for testing!"
+	return 1
+    fi  
+
     local key=$(./ceph-authtool --gen-print-key)
 
     if mon_mkfs --key='corrupted key' ; then
@@ -130,7 +139,7 @@ function auth_cephx_key() {
     timeout $TIMEOUT ./ceph \
         --name mon. \
         --keyring $MON_DIR/keyring \
-        --mon-host $MONA mon stat || return 1
+        --mon-host $CEPH_MON mon stat || return 1
 }
 
 function makedir() {
@@ -139,7 +148,9 @@ function makedir() {
     # fail if recursive directory creation is needed
     ./ceph-mon \
         --id $MON_ID \
-        --osd-pool-default-erasure-code-directory=.libs \
+        --mon-osd-full-ratio=.99 \
+        --mon-data-avail-crit=1 \
+        --erasure-code-dir=.libs \
         --mkfs \
         --mon-data=$toodeep 2>&1 | tee $DIR/makedir.log
     grep 'toodeep.*No such file' $DIR/makedir.log > /dev/null

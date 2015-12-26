@@ -52,14 +52,14 @@ public:
 private:
   CephContext *cct;
   const int registry_shards;
-  SharedLRU<ghobject_t, FD> *registry;
+  SharedLRU<ghobject_t, FD, ghobject_t::BitwiseComparator> *registry;
 
 public:
   FDCache(CephContext *cct) : cct(cct),
   registry_shards(cct->_conf->filestore_fd_cache_shards) {
     assert(cct);
     cct->_conf->add_observer(this);
-    registry = new SharedLRU<ghobject_t, FD>[registry_shards];
+    registry = new SharedLRU<ghobject_t, FD, ghobject_t::BitwiseComparator>[registry_shards];
     for (int i = 0; i < registry_shards; ++i) {
       registry[i].set_cct(cct);
       registry[i].set_size(
@@ -73,20 +73,19 @@ public:
   typedef ceph::shared_ptr<FD> FDRef;
 
   FDRef lookup(const ghobject_t &hoid) {
-    int registry_id = hoid.hobj.hash % registry_shards;
+    int registry_id = hoid.hobj.get_hash() % registry_shards;
     return registry[registry_id].lookup(hoid);
   }
 
   FDRef add(const ghobject_t &hoid, int fd, bool *existed) {
-    int registry_id = hoid.hobj.hash % registry_shards;
+    int registry_id = hoid.hobj.get_hash() % registry_shards;
     return registry[registry_id].add(hoid, new FD(fd), existed);
   }
 
   /// clear cached fd for hoid, subsequent lookups will get an empty FD
   void clear(const ghobject_t &hoid) {
-    int registry_id = hoid.hobj.hash % registry_shards;
-    registry[registry_id].clear(hoid);
-    assert(!registry[registry_id].lookup(hoid));
+    int registry_id = hoid.hobj.get_hash() % registry_shards;
+    registry[registry_id].purge(hoid);
   }
 
   /// md_config_obs_t

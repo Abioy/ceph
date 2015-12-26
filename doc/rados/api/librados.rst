@@ -183,4 +183,5 @@ Note that all the :c:type:`rados_completion_t` must be freed with :c:func:`rados
 API calls
 =========
 
- .. doxygenfile:: librados.h
+ .. autodoxygenfile:: rados_types.h
+ .. autodoxygenfile:: librados.h

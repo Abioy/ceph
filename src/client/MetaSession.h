@@ -10,6 +10,7 @@
 #include "include/xlist.h"
 
 #include "messages/MClientCapRelease.h"
+#include "mds/MDSMap.h"
 
 struct Cap;
 struct Inode;
@@ -18,7 +19,7 @@ struct MetaRequest;
 class MClientCapRelease;
 
 struct MetaSession {
-  int mds_num;
+  mds_rank_t mds_num;
   ConnectionRef con;
   version_t seq;
   uint64_t cap_gen;
@@ -36,6 +37,8 @@ struct MetaSession {
     STATE_STALE,
   } state;
 
+  bool readonly;
+
   list<Context*> waiting_for_open;
 
   xlist<Cap*> caps;
@@ -43,6 +46,7 @@ struct MetaSession {
   xlist<CapSnap*> flushing_capsnaps;
   xlist<MetaRequest*> requests;
   xlist<MetaRequest*> unsafe_requests;
+  std::set<ceph_tid_t> flushing_caps_tids;
 
   Cap *s_cap_iterator;
 
@@ -51,7 +55,7 @@ struct MetaSession {
   MetaSession()
     : mds_num(-1), con(NULL),
       seq(0), cap_gen(0), cap_renew_seq(0), num_caps(0),
-      state(STATE_NEW), s_cap_iterator(NULL),
+      state(STATE_NEW), readonly(false), s_cap_iterator(NULL),
       release(NULL)
   {}
   ~MetaSession();
@@ -59,6 +63,9 @@ struct MetaSession {
   const char *get_state_name() const;
 
   void dump(Formatter *f) const;
+
+  void enqueue_cap_release(inodeno_t ino, uint64_t cap_id, ceph_seq_t iseq,
+      ceph_seq_t mseq, epoch_t osd_barrier);
 };
 
 #endif

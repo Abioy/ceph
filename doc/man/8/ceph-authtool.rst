@@ -1,3 +1,5 @@
+:orphan:
+
 =================================================
  ceph-authtool -- ceph keyring manipulation tool
 =================================================
@@ -157,7 +159,7 @@ To display the contents of the keyring::
 
         ceph-authtool -l keyring
 
-When mount a Ceph file system, you can grab the appropriately encoded secret key with::
+When mounting a Ceph file system, you can grab the appropriately encoded secret key with::
 
         mount -t ceph serverhost:/ mountpoint -o name=foo,secret=`ceph-authtool -p -n client.foo keyring`
 
@@ -165,7 +167,7 @@ When mount a Ceph file system, you can grab the appropriately encoded secret key
 Availability
 ============
 
-**ceph-authtool** is part of the Ceph distributed storage system. Please
+**ceph-authtool** is part of Ceph, a massively scalable, open-source, distributed storage system. Please
 refer to the Ceph documentation at http://ceph.com/docs for more
 information.
 

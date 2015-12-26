@@ -24,42 +24,34 @@ using std::map;
 using std::list;
 using std::set;
 
-class MDS;
+class MDSRank;
 class Session;
-class CDir;
 class CInode;
 class CDentry;
-class EMetaBlob;
 struct SnapRealm;
 
 class Message;
 
-class MDiscover;
-class MDiscoverReply;
-class MCacheExpire;
-class MDirUpdate;
-class MDentryUnlink;
 class MLock;
 
-class MClientRequest;
-
 class Capability;
-class LogSegment;
 
 class SimpleLock;
 class ScatterLock;
 class LocalLock;
+
 class MDCache;
+typedef ceph::shared_ptr<MDRequestImpl> MDRequestRef;
 
 #include "SimpleLock.h"
 
 class Locker {
 private:
-  MDS *mds;
+  MDSRank *mds;
   MDCache *mdcache;
  
  public:
-  Locker(MDS *m, MDCache *c) : mds(m), mdcache(c) {}  
+  Locker(MDSRank *m, MDCache *c) : mds(m), mdcache(c) {}  
 
   SimpleLock *get_lock(int lock_type, MDSCacheObjectInfo &info);
   
@@ -86,7 +78,7 @@ public:
 		     set<SimpleLock*> &rdlocks,
 		     set<SimpleLock*> &wrlocks,
 		     set<SimpleLock*> &xlocks,
-		     map<SimpleLock*,int> *remote_wrlocks=NULL,
+		     map<SimpleLock*,mds_rank_t> *remote_wrlocks=NULL,
 		     CInode *auth_pin_freeze=NULL,
 		     bool auth_pin_nonblock=false);
 
@@ -125,8 +117,8 @@ public:
   bool wrlock_start(SimpleLock *lock, MDRequestRef& mut, bool nowait=false);
   void wrlock_finish(SimpleLock *lock, MutationImpl *mut, bool *pneed_issue);
 
-  void remote_wrlock_start(SimpleLock *lock, int target, MDRequestRef& mut);
-  void remote_wrlock_finish(SimpleLock *lock, int target, MutationImpl *mut);
+  void remote_wrlock_start(SimpleLock *lock, mds_rank_t target, MDRequestRef& mut);
+  void remote_wrlock_finish(SimpleLock *lock, mds_rank_t target, MutationImpl *mut);
 
   bool xlock_start(SimpleLock *lock, MDRequestRef& mut);
   void _finish_xlock(SimpleLock *lock, client_t xlocker, bool *pneed_issue);
@@ -161,7 +153,6 @@ public:
 
 protected:
   void handle_scatter_lock(ScatterLock *lock, MLock *m);
-  void _scatter_replica_lock(ScatterLock *lock, int auth);
   bool scatter_scatter_fastpath(ScatterLock *lock);
   void scatter_scatter(ScatterLock *lock, bool nowait=false);
   void scatter_tempsync(ScatterLock *lock, bool *need_issue=0);
@@ -194,19 +185,25 @@ public:
 
   void remove_client_cap(CInode *in, client_t client);
 
+  void get_late_revoking_clients(std::list<client_t> *result) const;
+  bool any_late_revoking_caps(xlist<Capability*> const &revoking) const;
+
  protected:
   void adjust_cap_wanted(Capability *cap, int wanted, int issue_seq);
   void handle_client_caps(class MClientCaps *m);
   void _update_cap_fields(CInode *in, int dirty, MClientCaps *m, inode_t *pi);
   void _do_snap_update(CInode *in, snapid_t snap, int dirty, snapid_t follows, client_t client, MClientCaps *m, MClientCaps *ack);
-  void _do_null_snapflush(CInode *head_in, client_t client, snapid_t follows);
+  void _do_null_snapflush(CInode *head_in, client_t client);
   bool _do_cap_update(CInode *in, Capability *cap, int dirty, snapid_t follows, MClientCaps *m,
 		      MClientCaps *ack=0);
   void handle_client_cap_release(class MClientCapRelease *m);
   void _do_cap_release(client_t client, inodeno_t ino, uint64_t cap_id, ceph_seq_t mseq, ceph_seq_t seq);
   void caps_tick();
 
+  // Maintain a global list to quickly find if any caps are late revoking
   xlist<Capability*> revoking_caps;
+  // Maintain a per-client list to find clients responsible for late ones quickly
+  std::map<client_t, xlist<Capability*> > revoking_caps_by_client;
 
   // local
 public:

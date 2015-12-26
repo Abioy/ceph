@@ -14,7 +14,9 @@
 
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef __linux__
 #include <sys/syscall.h>   /* For SYS_xxx definitions */
+#endif
 #include <algorithm>
 #include <errno.h>
 
@@ -41,8 +43,8 @@ int ceph_ioprio_set(int whence, int who, int ioprio)
 
 int ceph_ioprio_string_to_class(const std::string& s)
 {
-  std::string l;
-  std::transform(s.begin(), s.end(), l.begin(), ::tolower);
+  std::string l = s;
+  std::transform(l.begin(), l.end(), l.begin(), ::tolower);
 
   if (l == "idle")
     return IOPRIO_CLASS_IDLE;

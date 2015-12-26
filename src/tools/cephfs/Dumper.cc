@@ -29,6 +29,7 @@
 
 #define dout_subsys ceph_subsys_mds
 
+#define HEADER_LEN 4096
 
 int Dumper::init(int rank_)
 {
@@ -69,7 +70,7 @@ int Dumper::recover_journal(Journaler *journaler)
 }
 
 
-void Dumper::dump(const char *dump_file)
+int Dumper::dump(const char *dump_file)
 {
   int r = 0;
 
@@ -77,89 +78,156 @@ void Dumper::dump(const char *dump_file)
                                        objecter, 0, 0, &timer, &finisher);
   r = recover_journal(&journaler);
   if (r) {
-    return;
+    return r;
   }
   uint64_t start = journaler.get_read_pos();
   uint64_t end = journaler.get_write_pos();
   uint64_t len = end-start;
 
+  Filer filer(objecter, &finisher);
+
   cout << "journal is " << start << "~" << len << std::endl;
-
-  Filer filer(objecter);
-  bufferlist bl;
-
-  C_SaferCond cond;
-  lock.Lock();
-  filer.read(ino, &journaler.get_layout(), CEPH_NOSNAP,
-             start, len, &bl, 0, &cond);
-  lock.Unlock();
-  r = cond.wait();
-
-  cout << "read " << bl.length() << " bytes at offset " << start << std::endl;
 
   int fd = ::open(dump_file, O_WRONLY|O_CREAT|O_TRUNC, 0644);
   if (fd >= 0) {
     // include an informative header
-    char buf[200];
+    char buf[HEADER_LEN];
     memset(buf, 0, sizeof(buf));
-    sprintf(buf, "Ceph mds%d journal dump\n start offset %llu (0x%llx)\n       length %llu (0x%llx)\n    write_pos %llu (0x%llx)\n    format %llu\n%c",
+    snprintf(buf, HEADER_LEN, "Ceph mds%d journal dump\n start offset %llu (0x%llx)\n       length %llu (0x%llx)\n    write_pos %llu (0x%llx)\n    format %llu\n    trimmed_pos %llu (0x%llx)\n%c",
 	    rank, 
 	    (unsigned long long)start, (unsigned long long)start,
-	    (unsigned long long)bl.length(), (unsigned long long)bl.length(),
+	    (unsigned long long)len, (unsigned long long)len,
 	    (unsigned long long)journaler.last_committed.write_pos, (unsigned long long)journaler.last_committed.write_pos,
 	    (unsigned long long)journaler.last_committed.stream_format,
+	    (unsigned long long)journaler.last_committed.trimmed_pos, (unsigned long long)journaler.last_committed.trimmed_pos,
 	    4);
-    int r = safe_write(fd, buf, sizeof(buf));
-    if (r)
-      ceph_abort();
+    r = safe_write(fd, buf, sizeof(buf));
+    if (r) {
+      derr << "Error " << r << " (" << cpp_strerror(r) << ") writing journal file header" << dendl;
+      ::close(fd);
+      return r;
+    }
 
     // write the data
-    ::lseek64(fd, start, SEEK_SET);
-    bl.write_fd(fd);
-    ::close(fd);
+    off64_t seeked = ::lseek64(fd, start, SEEK_SET);
+    if (seeked == (off64_t)-1) {
+      r = errno;
+      derr << "Error " << r << " (" << cpp_strerror(r) << ") seeking to 0x" << std::hex << start << std::dec << dendl;
+      ::close(fd);
+      return r;
+    }
 
-    cout << "wrote " << bl.length() << " bytes at offset " << start << " to " << dump_file << "\n"
+
+    // Read and write 32MB chunks.  Slower than it could be because we're not
+    // streaming, but that's okay because this is just a debug/disaster tool.
+    const uint32_t chunk_size = 32 * 1024 * 1024;
+
+    for (uint64_t pos = start; pos < start + len; pos += chunk_size) {
+      bufferlist bl;
+      dout(10) << "Reading at pos=0x" << std::hex << pos << std::dec << dendl;
+
+      const uint32_t read_size = MIN(chunk_size, end - pos);
+
+      C_SaferCond cond;
+      lock.Lock();
+      filer.read(ino, &journaler.get_layout(), CEPH_NOSNAP,
+                 pos, read_size, &bl, 0, &cond);
+      lock.Unlock();
+      r = cond.wait();
+      if (r < 0) {
+        derr << "Error " << r << " (" << cpp_strerror(r) << ") reading "
+                "journal at offset 0x" << std::hex << pos << std::dec << dendl;
+        ::close(fd);
+        return r;
+      }
+      dout(10) << "Got 0x" << std::hex << bl.length() << std::dec
+               << " bytes" << dendl;
+
+      r = bl.write_fd(fd);
+      if (r) {
+        derr << "Error " << r << " (" << cpp_strerror(r) << ") writing journal file" << dendl;
+        ::close(fd);
+        return r;
+      }
+    }
+
+    r = ::close(fd);
+    if (r) {
+      r = errno;
+      derr << "Error " << r << " (" << cpp_strerror(r) << ") closing journal file" << dendl;
+      return r;
+    }
+
+    cout << "wrote " << len << " bytes at offset " << start << " to " << dump_file << "\n"
 	 << "NOTE: this is a _sparse_ file; you can\n"
 	 << "\t$ tar cSzf " << dump_file << ".tgz " << dump_file << "\n"
 	 << "      to efficiently compress it while preserving sparseness." << std::endl;
+    return 0;
   } else {
     int err = errno;
     derr << "unable to open " << dump_file << ": " << cpp_strerror(err) << dendl;
+    return err;
   }
 }
 
-void Dumper::undump(const char *dump_file)
+int Dumper::undump(const char *dump_file)
 {
-
   cout << "undump " << dump_file << std::endl;
   
+  int r = 0;
   int fd = ::open(dump_file, O_RDONLY);
   if (fd < 0) {
-    derr << "couldn't open " << dump_file << ": " << cpp_strerror(errno) << dendl;
-    return;
+    r = errno;
+    derr << "couldn't open " << dump_file << ": " << cpp_strerror(r) << dendl;
+    return r;
   }
 
   // Ceph mds0 journal dump
   //  start offset 232401996 (0xdda2c4c)
   //        length 1097504 (0x10bf20)
 
-  char buf[200];
-  int r = safe_read(fd, buf, sizeof(buf));
+  char buf[HEADER_LEN];
+  r = safe_read(fd, buf, sizeof(buf));
   if (r < 0) {
     VOID_TEMP_FAILURE_RETRY(::close(fd));
-    return;
+    return r;
   }
 
-  long long unsigned start, len, write_pos, format;
+  long long unsigned start, len, write_pos, format, trimmed_pos;
   sscanf(strstr(buf, "start offset"), "start offset %llu", &start);
   sscanf(strstr(buf, "length"), "length %llu", &len);
   sscanf(strstr(buf, "write_pos"), "write_pos %llu", &write_pos);
   sscanf(strstr(buf, "format"), "format %llu", &format);
+  if (strstr(buf, "trimmed_pos")) {
+    sscanf(strstr(buf, "trimmed_pos"), "trimmed_pos %llu", &trimmed_pos);
+  } else {
+    // Old format dump, any untrimmed objects before expire_pos will
+    // be discarded as trash.
+    trimmed_pos = start - (start % g_default_file_layout.fl_object_size);
+  }
 
-  cout << "start " << start << " len " << len << std::endl;
+  if (trimmed_pos > start) {
+    derr << std::hex << "Invalid header (trimmed 0x" << trimmed_pos
+      << " > expire 0x" << start << std::dec << dendl;
+    ::close(fd);
+    return -EINVAL;
+  }
+
+  if (start > write_pos) {
+    derr << std::hex << "Invalid header (expire 0x" << start
+      << " > write 0x" << write_pos << std::dec << dendl;
+    ::close(fd);
+    return -EINVAL;
+  }
+
+  cout << "start " << start <<
+    " len " << len <<
+    " write_pos " << write_pos <<
+    " format " << format <<
+    " trimmed_pos " << trimmed_pos << std::endl;
   
   Journaler::Header h;
-  h.trimmed_pos = start;
+  h.trimmed_pos = trimmed_pos;
   h.expire_pos = start;
   h.write_pos = write_pos;
   h.stream_format = format;
@@ -178,17 +246,19 @@ void Dumper::undump(const char *dump_file)
   cout << "writing header " << oid << std::endl;
   C_SaferCond header_cond;
   lock.Lock();
-  objecter->write_full(oid, oloc, snapc, hbl, ceph_clock_now(g_ceph_context), 0, 
+  objecter->write_full(oid, oloc, snapc, hbl,
+		       ceph::real_clock::now(g_ceph_context), 0,
 		       NULL, &header_cond);
   lock.Unlock();
 
   r = header_cond.wait();
   if (r != 0) {
     derr << "Failed to write header: " << cpp_strerror(r) << dendl;
-    return;
+    ::close(fd);
+    return r;
   }
 
-  Filer filer(objecter);
+  Filer filer(objecter, &finisher);
 
   /* Erase any objects at the end of the region to which we shall write
    * the new log data.  This is to avoid leaving trailing junk after
@@ -203,11 +273,12 @@ void Dumper::undump(const char *dump_file)
     C_SaferCond purge_cond;
     cout << "Purging " << purge_count << " objects from " << last_obj << std::endl;
     lock.Lock();
-    filer.purge_range(ino, &h.layout, snapc, last_obj, purge_count, ceph_clock_now(g_ceph_context), 0, &purge_cond);
+    filer.purge_range(ino, &h.layout, snapc, last_obj, purge_count,
+		      ceph::real_clock::now(g_ceph_context), 0, &purge_cond);
     lock.Unlock();
     purge_cond.wait();
   }
-  
+
   // Stream from `fd` to `filer`
   uint64_t pos = start;
   uint64_t left = len;
@@ -222,13 +293,15 @@ void Dumper::undump(const char *dump_file)
     cout << " writing " << pos << "~" << l << std::endl;
     C_SaferCond write_cond;
     lock.Lock();
-    filer.write(ino, &h.layout, snapc, pos, l, j, ceph_clock_now(g_ceph_context), 0, NULL, &write_cond);
+    filer.write(ino, &h.layout, snapc, pos, l, j,
+		ceph::real_clock::now(g_ceph_context), 0, NULL, &write_cond);
     lock.Unlock();
 
     r = write_cond.wait();
     if (r != 0) {
       derr << "Failed to write header: " << cpp_strerror(r) << dendl;
-      return;
+      ::close(fd);
+      return r;
     }
       
     // Advance
@@ -238,5 +311,6 @@ void Dumper::undump(const char *dump_file)
 
   VOID_TEMP_FAILURE_RETRY(::close(fd));
   cout << "done." << std::endl;
+  return 0;
 }
 

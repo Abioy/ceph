@@ -275,10 +275,10 @@ void RGWMetadataManager::parse_metadata_key(const string& metadata_key, string& 
   int pos = metadata_key.find(':');
   if (pos < 0) {
     type = metadata_key;
+  } else {
+    type = metadata_key.substr(0, pos);
+    entry = metadata_key.substr(pos + 1);
   }
-
-  type = metadata_key.substr(0, pos);
-  entry = metadata_key.substr(pos + 1);
 }
 
 int RGWMetadataManager::find_handler(const string& metadata_key, RGWMetadataHandler **handler, string& entry)
@@ -601,7 +601,7 @@ int RGWMetadataManager::remove_entry(RGWMetadataHandler *handler, string& key, R
 
   rgw_obj obj(bucket, oid);
 
-  ret = store->delete_system_obj(NULL, obj, objv_tracker);
+  ret = store->delete_system_obj(obj, objv_tracker);
   /* cascading ret into post_modify() */
 
   ret = post_modify(handler, section, key, log_data, objv_tracker, ret);
